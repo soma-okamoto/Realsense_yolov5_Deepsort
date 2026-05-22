@@ -13,3 +13,22 @@ Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/runs/
 
 # YOLO weight files
 Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/**/*.pt
+
+# YOLO / StrongSORT heavy files
+Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/yolov5/runs/
+Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/runs/
+
+Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/**/*.pt
+Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/**/*.pth
+Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/**/*.onnx
+Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/**/*.engine
+
+Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/data/train/
+Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/data/valid/
+Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/data/datasets/
+
+Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/**/__pycache__/
+Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/**/*.pyc
+
+
+
