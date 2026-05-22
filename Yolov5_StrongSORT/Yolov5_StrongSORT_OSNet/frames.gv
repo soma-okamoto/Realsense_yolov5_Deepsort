@@ -1,0 +1,12 @@
+digraph G {
+"arm_2_link_5" -> "camera_link"[label="Broadcaster: /realsense_to_youbot_tf_broadcaster\nAverage rate: 10000.000 Hz\nMost recent transform: 0.000 ( 1777527457.375 sec old)\nBuffer length: 0.000 sec\n"];
+"map" -> "odom"[label="Broadcaster: /slam_toolbox\nAverage rate: 50.201 Hz\nMost recent transform: 1777527457.573 ( -0.198 sec old)\nBuffer length: 4.960 sec\n"];
+edge [style=invis];
+ subgraph cluster_legend { style=bold; color=black; label ="view_frames Result";
+"Recorded at time: 1777527457.375"[ shape=plaintext ] ;
+ }->"arm_2_link_5";
+edge [style=invis];
+ subgraph cluster_legend { style=bold; color=black; label ="view_frames Result";
+"Recorded at time: 1777527457.375"[ shape=plaintext ] ;
+ }->"map";
+}
