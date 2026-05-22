@@ -7,3 +7,9 @@ __pycache__/
 build/
 devel/
 logs/
+# YOLO training outputs
+Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/yolov5/runs/
+Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/runs/
+
+# YOLO weight files
+Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet/**/*.pt
