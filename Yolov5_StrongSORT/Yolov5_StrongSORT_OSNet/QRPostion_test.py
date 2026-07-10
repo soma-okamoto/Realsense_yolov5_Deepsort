@@ -22,7 +22,7 @@ detect_interval = 1
 last_points = None
 last_data = ""
 
-
+#test
 color_frame = None
 depth_frame = None
 cameraPosition = JointPositions()
