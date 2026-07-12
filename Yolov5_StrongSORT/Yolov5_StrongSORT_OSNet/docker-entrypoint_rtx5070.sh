@@ -7,12 +7,12 @@ if [ -f /opt/ros_py310/setup.bash ]; then
   source /opt/ros_py310/setup.bash
 fi
 
-# Source a mounted catkin workspace when available.
-for ws in /home/dars/catkin_ws /root/catkin_ws /catkin_ws; do
-  if [ -f "${ws}/devel/setup.bash" ]; then
-    source "${ws}/devel/setup.bash"
-    break
-  fi
-done
+HOST_WS="/home/dars/catkin_ws"
+
+if [ -f "${HOST_WS}/devel/setup.bash" ]; then
+  source "${HOST_WS}/devel/setup.bash"
+elif [ -d "${HOST_WS}/src" ]; then
+  export ROS_PACKAGE_PATH="${HOST_WS}/src:${ROS_PACKAGE_PATH:-}"
+fi
 
 exec "$@"

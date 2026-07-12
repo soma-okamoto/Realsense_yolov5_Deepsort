@@ -1,16 +1,10 @@
-# syntax=docker/dockerfile:1
-# GTX 1650 / ROS Noetic / Python 3.8 / PyTorch 2.0.1 + CUDA 11.8
-#
-# Build context:
-#   Yolov5_StrongSORT_OSNet/
-#     Dockerfile
-#     docker-entrypoint.sh
-#     requirements.txt
-#     yolov5/requirements.txt
+# GTX 1650 / ROS Noetic / Python 3.8
+# PyTorch 2.0.1 + CUDA 11.8
 
 FROM ros:noetic-ros-base-focal
 
 ARG DEBIAN_FRONTEND=noninteractive
+
 ENV TZ=Asia/Tokyo \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
@@ -22,7 +16,7 @@ ENV TZ=Asia/Tokyo \
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # -----------------------------------------------------------------------------
-# ROS, OpenCV GUI and Python build/runtime packages
+# ROS / OpenCV / Python packages
 # -----------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bash-completion \
@@ -40,10 +34,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       python3-pip \
       python3-setuptools \
       python3-wheel \
+      python3-catkin-tools \
       ros-noetic-cv-bridge \
       ros-noetic-geometry-msgs \
       ros-noetic-image-transport \
       ros-noetic-message-filters \
+      ros-noetic-message-generation \
+      ros-noetic-message-runtime \
       ros-noetic-move-base-msgs \
       ros-noetic-sensor-msgs \
       ros-noetic-std-msgs \
@@ -51,16 +48,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-noetic-tf2-ros \
     && rm -rf /var/lib/apt/lists/*
 
-# Python 3.8-compatible packaging tools.
+# Python 3.8 compatible versions
 RUN python3 -m pip install --no-cache-dir --upgrade \
       pip==23.3.2 \
       setuptools==68.2.2 \
       wheel==0.41.3
 
 # -----------------------------------------------------------------------------
-# GPU-enabled PyTorch for CUDA 11.8.
-# The cu118 wheels include the CUDA user-space runtime required by PyTorch.
-# The host still needs an NVIDIA driver and NVIDIA Container Toolkit.
+# CUDA 11.8版 PyTorch
 # -----------------------------------------------------------------------------
 RUN python3 -m pip install --no-cache-dir \
       torch==2.0.1+cu118 \
@@ -69,10 +64,9 @@ RUN python3 -m pip install --no-cache-dir \
 
 # -----------------------------------------------------------------------------
 # StrongSORT / YOLOv5 requirements
-# Keep the CUDA-enabled torch packages installed above and constrain old-project
-# dependencies to versions that still support Ubuntu 20.04 / Python 3.8.
 # -----------------------------------------------------------------------------
 WORKDIR /opt/strongsort-build
+
 COPY requirements.txt /tmp/strongsort-requirements.txt
 COPY yolov5/requirements.txt /tmp/yolov5-requirements.txt
 
@@ -81,12 +75,16 @@ RUN sed -E \
       -e '/^[[:space:]]*torchvision([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
       -e '/^[[:space:]]*tb-nightly([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
       -e '/^[[:space:]]*tensorboard([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
-      /tmp/strongsort-requirements.txt > /tmp/strongsort-clean.txt \
+      -e '/^[[:space:]]*PyYAML([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
+      /tmp/strongsort-requirements.txt \
+      > /tmp/strongsort-clean.txt \
     && sed -E \
       -e '/^[[:space:]]*torch([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
       -e '/^[[:space:]]*torchvision([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
       -e '/^[[:space:]]*tensorboard([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
-      /tmp/yolov5-requirements.txt > /tmp/yolov5-clean.txt \
+      -e '/^[[:space:]]*PyYAML([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
+      /tmp/yolov5-requirements.txt \
+      > /tmp/yolov5-clean.txt \
     && printf '%s\n' \
       'Cython==0.29.36' \
       'h5py==3.10.0' \
@@ -109,23 +107,51 @@ RUN sed -E \
       -r /tmp/strongsort-clean.txt \
       -r /tmp/yolov5-clean.txt \
       tensorboard==2.13.0 \
-      pyrealsense2==2.50.0.3812 \
-    && python3 -m pip check
+      pyrealsense2==2.50.0.3812
 
-# Fail the image build if a CPU-only torch wheel was installed accidentally.
-RUN python3 - <<'PY'
-import torch
-print("torch:", torch.__version__)
-print("torch CUDA runtime:", torch.version.cuda)
-assert "+cu118" in torch.__version__, torch.__version__
-assert torch.version.cuda == "11.8", torch.version.cuda
-PY
+# -----------------------------------------------------------------------------
+# StrongSORTが要求する公式torchreid
+#
+# PyPIのtorchreid==0.2.5では、
+# torchreid.metrics.distance が存在しないため使用しない。
+# -----------------------------------------------------------------------------
+RUN python3 -m pip uninstall -y torchreid || true \
+    && python3 -m pip install --no-cache-dir --no-deps \
+      "git+https://github.com/KaiyangZhou/deep-person-reid.git@f8cd150fdf77e8d9e1ed143b7f308c2c609ded50"
 
+
+# torchreidが実行時に使用する追加依存
+RUN python3 -m pip install --no-cache-dir \
+      chardet==5.2.0
+
+# 推論に必要な主要モジュールを個別確認
+# torchreidのtb-nightly要求は学習環境向けなので、推論用イメージでは無視する
+RUN python3 -c "import torch; \
+import cv2; \
+import numpy; \
+import pyrealsense2; \
+from torchreid.metrics.distance import compute_distance_matrix; \
+print('Runtime dependency check OK')"
+
+# PyTorch CUDA版確認
+# heredocではなく、旧Docker builderでも動く形にする
+RUN python3 -c "import torch; \
+print('torch:', torch.__version__); \
+print('torch CUDA runtime:', torch.version.cuda); \
+assert '+cu118' in torch.__version__, torch.__version__; \
+assert torch.version.cuda == '11.8', torch.version.cuda"
+
+# torchreid構成確認
+RUN python3 -c "from torchreid.metrics.distance import compute_distance_matrix; \
+print('official torchreid OK')"
+
+# -----------------------------------------------------------------------------
+# Entrypoint
+# -----------------------------------------------------------------------------
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Match the host workspace path so an existing catkin devel/setup.bash remains
-# valid when ~/catkin_ws is bind-mounted from the dars account.
 WORKDIR /home/dars/catkin_ws/src/Realsense_yolov5_Deepsort/Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

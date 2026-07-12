@@ -1,5 +1,13 @@
 # syntax=docker/dockerfile:1
-# RTX 50 series / CUDA 12.8 + ROS Noetic + Python 3.10
+# RTX 5070 / ROS Noetic / Python 3.10 / PyTorch 2.7.1 + CUDA 12.8
+#
+# Build context:
+#   Yolov5_StrongSORT_OSNet/
+#     Dockerfile.rtx5070
+#     docker-entrypoint_rtx5070.sh
+#     requirements.txt
+#     yolov5/requirements.txt
+
 FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu20.04
 
 ARG DEBIAN_FRONTEND=noninteractive
@@ -7,18 +15,21 @@ ARG ROS_DISTRO=noetic
 ARG BOOST_VERSION=1.71.0
 ARG BOOST_VERSION_UNDERSCORE=1_71_0
 
-ENV LANG=C.UTF-8 \
+ENV TZ=Asia/Tokyo \
+    LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    TZ=Asia/Tokyo \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics \
     CONDA_DIR=/opt/conda \
     CONDA_ENV=/opt/conda/envs/rosgpu \
-    TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \
-    PYTHONUNBUFFERED=1
+    TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # -----------------------------------------------------------------------------
-# OS / build dependencies
+# OS / GUI / build dependencies
 # -----------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
       bash-completion \
@@ -27,11 +38,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
       cmake \
       curl \
+      ffmpeg \
       git \
       gnupg2 \
       libeigen3-dev \
       libgl1 \
       libglib2.0-0 \
+      libgomp1 \
       libgtk2.0-dev \
       libjpeg-dev \
       libopenblas-dev \
@@ -59,18 +72,23 @@ RUN curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc \
     && apt-get update && apt-get install -y --no-install-recommends \
       python3-catkin-tools \
       python3-rosdep \
+      ros-noetic-actionlib \
       ros-noetic-cv-bridge \
       ros-noetic-geometry-msgs \
       ros-noetic-image-transport \
+      ros-noetic-message-filters \
+      ros-noetic-message-generation \
+      ros-noetic-message-runtime \
+      ros-noetic-move-base-msgs \
       ros-noetic-ros-base \
       ros-noetic-sensor-msgs \
       ros-noetic-std-msgs \
+      ros-noetic-tf2-geometry-msgs \
       ros-noetic-tf2-ros \
     && rm -rf /var/lib/apt/lists/*
 
 # -----------------------------------------------------------------------------
 # Python 3.10 environment
-# PyTorch CUDA 12.8 wheels no longer target Ubuntu 20.04's system Python 3.8.
 # -----------------------------------------------------------------------------
 RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
       -O /tmp/miniconda.sh \
@@ -82,23 +100,26 @@ RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.s
 ENV PATH=${CONDA_ENV}/bin:${CONDA_DIR}/bin:${PATH}
 
 RUN python -m pip install --no-cache-dir --upgrade \
-      "pip<26" \
-      "setuptools<76" \
-      wheel \
+      pip==25.1.1 \
+      setuptools==75.8.2 \
+      wheel==0.45.1 \
+    && python -m pip install --no-cache-dir \
       catkin_pkg \
       rospkg \
-      "empy==3.3.4" \
-      "numpy==1.26.4"
+      empy==3.3.4 \
+      numpy==1.23.5
 
-# CUDA 12.8 build with Blackwell / RTX 50-series support.
+# -----------------------------------------------------------------------------
+# PyTorch CUDA 12.8: RTX 50 series / Blackwell support
+# -----------------------------------------------------------------------------
 RUN python -m pip install --no-cache-dir \
       torch==2.7.1 \
       torchvision==0.22.1 \
       --index-url https://download.pytorch.org/whl/cu128
 
 # -----------------------------------------------------------------------------
-# Build Boost.Python for Python 3.10.
-# Ubuntu 20.04's packaged Boost.Python is built for Python 3.8.
+# Boost.Python for Python 3.10
+# Ubuntu 20.04 packages are built for the system Python 3.8.
 # -----------------------------------------------------------------------------
 RUN mkdir -p /tmp/boost-src \
     && cd /tmp/boost-src \
@@ -119,7 +140,9 @@ RUN mkdir -p /tmp/boost-src \
       runtime-link=shared \
       install \
     && cd /opt/boost-python310/lib \
-    && BOOST_PY_LIB="$(find . -maxdepth 1 -type f -o -type l | grep -E 'libboost_python(310|3).*\.so$' | head -n1)" \
+    && BOOST_PY_LIB="$(find . -maxdepth 1 \( -type f -o -type l \) \
+         | grep -E 'libboost_python(310|3).*\.so' \
+         | head -n1)" \
     && test -n "${BOOST_PY_LIB}" \
     && ln -sf "$(basename "${BOOST_PY_LIB}")" libboost_python3.so \
     && rm -rf /tmp/boost-src
@@ -127,8 +150,7 @@ RUN mkdir -p /tmp/boost-src \
 ENV LD_LIBRARY_PATH=/opt/boost-python310/lib:${LD_LIBRARY_PATH}
 
 # -----------------------------------------------------------------------------
-# Rebuild cv_bridge for Python 3.10.
-# This overlays the apt-installed Python 3.8 cv_bridge.
+# Rebuild cv_bridge for Python 3.10
 # -----------------------------------------------------------------------------
 RUN mkdir -p /opt/cv_bridge_ws/src \
     && git clone --depth 1 --branch noetic \
@@ -157,46 +179,92 @@ RUN mkdir -p /opt/cv_bridge_ws/src \
         -DBoost_PYTHON_LIBRARY=/opt/boost-python310/lib/libboost_python3.so \
     && rm -rf /opt/cv_bridge_ws/build /opt/cv_bridge_ws/logs
 
-ENV PYTHONPATH=/opt/ros_py310/lib/python3.10/site-packages:/opt/ros_py310/lib/python3.10/dist-packages:/opt/ros/noetic/lib/python3/dist-packages:/usr/lib/python3/dist-packages:${PYTHONPATH} \
+ENV PYTHONPATH=/opt/ros_py310/lib/python3.10/site-packages:/opt/ros_py310/lib/python3.10/dist-packages:/opt/ros_py310/lib/python3/dist-packages:/opt/ros/noetic/lib/python3/dist-packages:/usr/lib/python3/dist-packages:${PYTHONPATH} \
     LD_LIBRARY_PATH=/opt/ros_py310/lib:/opt/boost-python310/lib:${LD_LIBRARY_PATH}
 
 # -----------------------------------------------------------------------------
-# StrongSORT / YOLOv5 Python dependencies
-# Build context must be Yolov5_StrongSORT_OSNet/.
+# StrongSORT / YOLOv5 dependencies
 # -----------------------------------------------------------------------------
 WORKDIR /opt/strongsort-build
+
 COPY requirements.txt /tmp/strongsort-requirements.txt
 COPY yolov5/requirements.txt /tmp/yolov5-requirements.txt
 
-# Keep the CUDA-enabled PyTorch installed above. Remove duplicated/incompatible
-# torch, torchvision and tb-nightly lines from the legacy requirement files.
 RUN sed -E \
-      -e '/^[[:space:]]*torch([<>=!~ ].*)?$/d' \
-      -e '/^[[:space:]]*torchvision([<>=!~ ].*)?$/d' \
-      -e '/^[[:space:]]*tb-nightly([<>=!~ ].*)?$/d' \
-      -e '/^[[:space:]]*tensorboard([<>=!~ ].*)?$/d' \
-      /tmp/strongsort-requirements.txt > /tmp/strongsort-clean.txt \
+      -e '/^[[:space:]]*torch([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
+      -e '/^[[:space:]]*torchvision([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
+      -e '/^[[:space:]]*tb-nightly([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
+      -e '/^[[:space:]]*tensorboard([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
+      -e '/^[[:space:]]*PyYAML([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
+      /tmp/strongsort-requirements.txt \
+      > /tmp/strongsort-clean.txt \
     && sed -E \
-      -e '/^[[:space:]]*torch([<>=!~ ].*)?$/d' \
-      -e '/^[[:space:]]*torchvision([<>=!~ ].*)?$/d' \
-      -e '/^[[:space:]]*tensorboard([<>=!~ ].*)?$/d' \
-      /tmp/yolov5-requirements.txt > /tmp/yolov5-clean.txt \
+      -e '/^[[:space:]]*torch([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
+      -e '/^[[:space:]]*torchvision([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
+      -e '/^[[:space:]]*tensorboard([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
+      -e '/^[[:space:]]*PyYAML([<>=!~ ].*)?([[:space:]]*#.*)?$/d' \
+      /tmp/yolov5-requirements.txt \
+      > /tmp/yolov5-clean.txt \
     && printf '%s\n' \
-      'numpy==1.26.4' \
-      'opencv-python==4.10.0.84' \
+      'Cython==0.29.36' \
+      'h5py==3.10.0' \
+      'imageio==2.34.2' \
+      'ipython==8.12.3' \
+      'matplotlib==3.7.5' \
+      'numpy==1.23.5' \
+      'opencv-python==4.8.1.78' \
+      'pandas==1.5.3' \
+      'Pillow==9.5.0' \
       'protobuf==3.20.1' \
-      'tensorboard==2.14.1' \
+      'psutil==5.9.8' \
+      'PyYAML==6.0.1' \
+      'scipy==1.10.1' \
+      'seaborn==0.12.2' \
+      'tensorboard==2.13.0' \
+      'tqdm==4.66.5' \
       > /tmp/constraints.txt \
     && python -m pip install --no-cache-dir \
       -c /tmp/constraints.txt \
       -r /tmp/strongsort-clean.txt \
       -r /tmp/yolov5-clean.txt \
-      tensorboard==2.14.1 \
-    && python -m pip check
+      tensorboard==2.13.0 \
+      pyrealsense2==2.55.1.6486
 
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+# -----------------------------------------------------------------------------
+# Official torchreid expected by this StrongSORT implementation
+# -----------------------------------------------------------------------------
+RUN python -m pip uninstall -y torchreid || true \
+    && python -m pip install --no-cache-dir --no-deps \
+      "git+https://github.com/KaiyangZhou/deep-person-reid.git@f8cd150fdf77e8d9e1ed143b7f308c2c609ded50" \
+    && python -m pip install --no-cache-dir chardet==5.2.0
+
+# -----------------------------------------------------------------------------
+# Build-time validation
+# GPU availability itself is checked when the container runs with --gpus all.
+# -----------------------------------------------------------------------------
+RUN python -c "import torch; \
+print('torch:', torch.__version__); \
+print('torch CUDA runtime:', torch.version.cuda); \
+assert torch.__version__.startswith('2.7.1'), torch.__version__; \
+assert torch.version.cuda == '12.8', torch.version.cuda"
+
+RUN source /opt/ros/noetic/setup.bash \
+    && source /opt/ros_py310/setup.bash \
+    && python -c "import rospy; \
+import cv2; \
+import cv_bridge; \
+import numpy; \
+import pyrealsense2; \
+from torchreid.metrics.distance import compute_distance_matrix; \
+print('RTX 5070 runtime dependency check OK')"
+
+# -----------------------------------------------------------------------------
+# Entrypoint
+# -----------------------------------------------------------------------------
+COPY docker-entrypoint_rtx5070.sh /usr/local/bin/docker-entrypoint_rtx5070.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint_rtx5070.sh
 
 WORKDIR /home/dars/catkin_ws
-ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint_rtx5070.sh"]
 CMD ["bash"]
