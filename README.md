@@ -1,17 +1,16 @@
 
-
 ```bash
+cd Realsense_yolov5_Deepsort/Yolov5_StrongSORT/Yolov5_StrongSORT_OSNet
+
+
 chmod +x \
   docker-entrypoint.sh \
   build_gtx1650.sh \
-  run_gtx1650.sh
-```
-
-```bash
-chmod +x \
+  run_gtx1650.sh \
   docker-entrypoint_rtx5070.sh \
   build_rtx5070.sh \
   run_rtx5070.sh
+
 ```
 
 
