@@ -63,6 +63,8 @@ xhost +local:docker
 ROS MasterのIPアドレスと、このPC自身のIPアドレスを指定して起動します。
 
 ```bash
+docker rm -f yolov5-strongsort:gtx1650-cu118
+
 sudo -E env \
   ROS_MASTER_URI=http://192.168.1.23:11311 \
   ROS_IP=192.168.1.23 \
@@ -107,6 +109,8 @@ xhost +local:docker
 ROS MasterのIPアドレスと、このPC自身のIPアドレスを指定して起動します。
 
 ```bash
+docker rm -f yolov5-strongsort:rtx5070-cu128
+
 sudo -E env \
   ROS_MASTER_URI=http://192.168.1.23:11311 \
   ROS_IP=192.168.1.23 \
