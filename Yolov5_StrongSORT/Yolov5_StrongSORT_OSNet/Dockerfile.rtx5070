@@ -1,0 +1,202 @@
+# syntax=docker/dockerfile:1
+# RTX 50 series / CUDA 12.8 + ROS Noetic + Python 3.10
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu20.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG ROS_DISTRO=noetic
+ARG BOOST_VERSION=1.71.0
+ARG BOOST_VERSION_UNDERSCORE=1_71_0
+
+ENV LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    TZ=Asia/Tokyo \
+    CONDA_DIR=/opt/conda \
+    CONDA_ENV=/opt/conda/envs/rosgpu \
+    TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 \
+    PYTHONUNBUFFERED=1
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# -----------------------------------------------------------------------------
+# OS / build dependencies
+# -----------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      bash-completion \
+      build-essential \
+      bzip2 \
+      ca-certificates \
+      cmake \
+      curl \
+      git \
+      gnupg2 \
+      libeigen3-dev \
+      libgl1 \
+      libglib2.0-0 \
+      libgtk2.0-dev \
+      libjpeg-dev \
+      libopenblas-dev \
+      libopencv-dev \
+      libpng-dev \
+      libsm6 \
+      libxext6 \
+      libxrender1 \
+      locales \
+      lsb-release \
+      pkg-config \
+      software-properties-common \
+      unzip \
+      wget \
+    && locale-gen en_US.UTF-8 ja_JP.UTF-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# ROS Noetic
+# -----------------------------------------------------------------------------
+RUN curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc \
+      | gpg --dearmor -o /usr/share/keyrings/ros-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros/ubuntu focal main" \
+      > /etc/apt/sources.list.d/ros1.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
+      python3-catkin-tools \
+      python3-rosdep \
+      ros-noetic-cv-bridge \
+      ros-noetic-geometry-msgs \
+      ros-noetic-image-transport \
+      ros-noetic-ros-base \
+      ros-noetic-sensor-msgs \
+      ros-noetic-std-msgs \
+      ros-noetic-tf2-ros \
+    && rm -rf /var/lib/apt/lists/*
+
+# -----------------------------------------------------------------------------
+# Python 3.10 environment
+# PyTorch CUDA 12.8 wheels no longer target Ubuntu 20.04's system Python 3.8.
+# -----------------------------------------------------------------------------
+RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
+      -O /tmp/miniconda.sh \
+    && bash /tmp/miniconda.sh -b -p "${CONDA_DIR}" \
+    && rm /tmp/miniconda.sh \
+    && "${CONDA_DIR}/bin/conda" create -y -p "${CONDA_ENV}" python=3.10 pip \
+    && "${CONDA_DIR}/bin/conda" clean -afy
+
+ENV PATH=${CONDA_ENV}/bin:${CONDA_DIR}/bin:${PATH}
+
+RUN python -m pip install --no-cache-dir --upgrade \
+      "pip<26" \
+      "setuptools<76" \
+      wheel \
+      catkin_pkg \
+      rospkg \
+      "empy==3.3.4" \
+      "numpy==1.26.4"
+
+# CUDA 12.8 build with Blackwell / RTX 50-series support.
+RUN python -m pip install --no-cache-dir \
+      torch==2.7.1 \
+      torchvision==0.22.1 \
+      --index-url https://download.pytorch.org/whl/cu128
+
+# -----------------------------------------------------------------------------
+# Build Boost.Python for Python 3.10.
+# Ubuntu 20.04's packaged Boost.Python is built for Python 3.8.
+# -----------------------------------------------------------------------------
+RUN mkdir -p /tmp/boost-src \
+    && cd /tmp/boost-src \
+    && wget -q \
+      "https://archives.boost.io/release/${BOOST_VERSION}/source/boost_${BOOST_VERSION_UNDERSCORE}.tar.bz2" \
+      -O boost.tar.bz2 \
+    && tar -xjf boost.tar.bz2 \
+    && cd "boost_${BOOST_VERSION_UNDERSCORE}" \
+    && ./bootstrap.sh \
+      --prefix=/opt/boost-python310 \
+      --with-libraries=python \
+      --with-python="${CONDA_ENV}/bin/python3" \
+      --with-python-root="${CONDA_ENV}" \
+    && ./b2 -j"$(nproc)" \
+      variant=release \
+      link=shared \
+      threading=multi \
+      runtime-link=shared \
+      install \
+    && cd /opt/boost-python310/lib \
+    && BOOST_PY_LIB="$(find . -maxdepth 1 -type f -o -type l | grep -E 'libboost_python(310|3).*\.so$' | head -n1)" \
+    && test -n "${BOOST_PY_LIB}" \
+    && ln -sf "$(basename "${BOOST_PY_LIB}")" libboost_python3.so \
+    && rm -rf /tmp/boost-src
+
+ENV LD_LIBRARY_PATH=/opt/boost-python310/lib:${LD_LIBRARY_PATH}
+
+# -----------------------------------------------------------------------------
+# Rebuild cv_bridge for Python 3.10.
+# This overlays the apt-installed Python 3.8 cv_bridge.
+# -----------------------------------------------------------------------------
+RUN mkdir -p /opt/cv_bridge_ws/src \
+    && git clone --depth 1 --branch noetic \
+      https://github.com/ros-perception/vision_opencv.git \
+      /opt/cv_bridge_ws/src/vision_opencv \
+    && source /opt/ros/${ROS_DISTRO}/setup.bash \
+    && catkin config \
+      --workspace /opt/cv_bridge_ws \
+      --extend /opt/ros/${ROS_DISTRO} \
+      --install \
+      --install-space /opt/ros_py310 \
+    && catkin build \
+      --workspace /opt/cv_bridge_ws \
+      cv_bridge \
+      --no-status \
+      --summarize \
+      --cmake-args \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DPYTHON_EXECUTABLE=${CONDA_ENV}/bin/python3 \
+        -DPYTHON_INCLUDE_DIR=${CONDA_ENV}/include/python3.10 \
+        -DPYTHON_LIBRARY=${CONDA_ENV}/lib/libpython3.10.so \
+        -DBOOST_ROOT=/opt/boost-python310 \
+        -DBoost_NO_SYSTEM_PATHS=ON \
+        -DBoost_INCLUDE_DIR=/opt/boost-python310/include \
+        -DBoost_LIBRARY_DIR=/opt/boost-python310/lib \
+        -DBoost_PYTHON_LIBRARY=/opt/boost-python310/lib/libboost_python3.so \
+    && rm -rf /opt/cv_bridge_ws/build /opt/cv_bridge_ws/logs
+
+ENV PYTHONPATH=/opt/ros_py310/lib/python3.10/site-packages:/opt/ros_py310/lib/python3.10/dist-packages:/opt/ros/noetic/lib/python3/dist-packages:/usr/lib/python3/dist-packages:${PYTHONPATH} \
+    LD_LIBRARY_PATH=/opt/ros_py310/lib:/opt/boost-python310/lib:${LD_LIBRARY_PATH}
+
+# -----------------------------------------------------------------------------
+# StrongSORT / YOLOv5 Python dependencies
+# Build context must be Yolov5_StrongSORT_OSNet/.
+# -----------------------------------------------------------------------------
+WORKDIR /opt/strongsort-build
+COPY requirements.txt /tmp/strongsort-requirements.txt
+COPY yolov5/requirements.txt /tmp/yolov5-requirements.txt
+
+# Keep the CUDA-enabled PyTorch installed above. Remove duplicated/incompatible
+# torch, torchvision and tb-nightly lines from the legacy requirement files.
+RUN sed -E \
+      -e '/^[[:space:]]*torch([<>=!~ ].*)?$/d' \
+      -e '/^[[:space:]]*torchvision([<>=!~ ].*)?$/d' \
+      -e '/^[[:space:]]*tb-nightly([<>=!~ ].*)?$/d' \
+      -e '/^[[:space:]]*tensorboard([<>=!~ ].*)?$/d' \
+      /tmp/strongsort-requirements.txt > /tmp/strongsort-clean.txt \
+    && sed -E \
+      -e '/^[[:space:]]*torch([<>=!~ ].*)?$/d' \
+      -e '/^[[:space:]]*torchvision([<>=!~ ].*)?$/d' \
+      -e '/^[[:space:]]*tensorboard([<>=!~ ].*)?$/d' \
+      /tmp/yolov5-requirements.txt > /tmp/yolov5-clean.txt \
+    && printf '%s\n' \
+      'numpy==1.26.4' \
+      'opencv-python==4.10.0.84' \
+      'protobuf==3.20.1' \
+      'tensorboard==2.14.1' \
+      > /tmp/constraints.txt \
+    && python -m pip install --no-cache-dir \
+      -c /tmp/constraints.txt \
+      -r /tmp/strongsort-clean.txt \
+      -r /tmp/yolov5-clean.txt \
+      tensorboard==2.14.1 \
+    && python -m pip check
+
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+WORKDIR /home/dars/catkin_ws
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
+CMD ["bash"]
