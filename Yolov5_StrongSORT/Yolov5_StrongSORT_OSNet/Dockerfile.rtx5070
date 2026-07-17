@@ -94,10 +94,30 @@ RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.s
       -O /tmp/miniconda.sh \
     && bash /tmp/miniconda.sh -b -p "${CONDA_DIR}" \
     && rm /tmp/miniconda.sh \
-    && "${CONDA_DIR}/bin/conda" create -y -p "${CONDA_ENV}" python=3.10 pip \
+    && "${CONDA_DIR}/bin/conda" tos accept \
+         --override-channels \
+         --channel https://repo.anaconda.com/pkgs/main \
+    && "${CONDA_DIR}/bin/conda" tos accept \
+         --override-channels \
+         --channel https://repo.anaconda.com/pkgs/r \
+    && "${CONDA_DIR}/bin/conda" create -y \
+         -p "${CONDA_ENV}" \
+         python=3.10 pip \
     && "${CONDA_DIR}/bin/conda" clean -afy
-
 ENV PATH=${CONDA_ENV}/bin:${CONDA_DIR}/bin:${PATH}
+
+# -----------------------------------------------------------------------------
+# PyKDL for Conda Python 3.10
+# -----------------------------------------------------------------------------
+RUN "${CONDA_DIR}/bin/conda" install -y \
+      -p "${CONDA_ENV}" \
+      --override-channels \
+      -c conda-forge \
+      python-orocos-kdl=1.5.3 \
+    && "${CONDA_DIR}/bin/conda" clean -afy \
+    && env -u PYTHONPATH PYTHONNOUSERSITE=1 \
+      "${CONDA_ENV}/bin/python" -c "import PyKDL; \
+print('PyKDL:', PyKDL.__file__)"
 
 RUN python -m pip install --no-cache-dir --upgrade \
       pip==25.1.1 \
@@ -128,12 +148,14 @@ RUN mkdir -p /tmp/boost-src \
       -O boost.tar.bz2 \
     && tar -xjf boost.tar.bz2 \
     && cd "boost_${BOOST_VERSION_UNDERSCORE}" \
+    && sed -i 's/_Py_fopen(/fopen(/g' libs/python/src/exec.cpp \
     && ./bootstrap.sh \
       --prefix=/opt/boost-python310 \
       --with-libraries=python \
       --with-python="${CONDA_ENV}/bin/python3" \
       --with-python-root="${CONDA_ENV}" \
-    && ./b2 -j"$(nproc)" \
+    && ./b2 -j2 \
+      --with-python \
       variant=release \
       link=shared \
       threading=multi \
@@ -169,6 +191,7 @@ RUN mkdir -p /opt/cv_bridge_ws/src \
       --summarize \
       --cmake-args \
         -DCMAKE_BUILD_TYPE=Release \
+        -DSETUPTOOLS_DEB_LAYOUT=OFF \
         -DPYTHON_EXECUTABLE=${CONDA_ENV}/bin/python3 \
         -DPYTHON_INCLUDE_DIR=${CONDA_ENV}/include/python3.10 \
         -DPYTHON_LIBRARY=${CONDA_ENV}/lib/libpython3.10.so \
@@ -179,9 +202,7 @@ RUN mkdir -p /opt/cv_bridge_ws/src \
         -DBoost_PYTHON_LIBRARY=/opt/boost-python310/lib/libboost_python3.so \
     && rm -rf /opt/cv_bridge_ws/build /opt/cv_bridge_ws/logs
 
-ENV PYTHONPATH=/opt/ros_py310/lib/python3.10/site-packages:/opt/ros_py310/lib/python3.10/dist-packages:/opt/ros_py310/lib/python3/dist-packages:/opt/ros/noetic/lib/python3/dist-packages:/usr/lib/python3/dist-packages:${PYTHONPATH} \
-    LD_LIBRARY_PATH=/opt/ros_py310/lib:/opt/boost-python310/lib:${LD_LIBRARY_PATH}
-
+ENV PYTHONPATH=/opt/ros_py310/lib/python3.10/site-packages:/opt/ros_py310/lib/python3.10/dist-packages:/opt/ros_py310/lib/python3/dist-packages:/opt/ros/noetic/lib/python3/dist-packages
 # -----------------------------------------------------------------------------
 # StrongSORT / YOLOv5 dependencies
 # -----------------------------------------------------------------------------
@@ -223,39 +244,77 @@ RUN sed -E \
       'tensorboard==2.13.0' \
       'tqdm==4.66.5' \
       > /tmp/constraints.txt \
-    && python -m pip install --no-cache-dir \
+    && PYTHONPATH= python -m pip install --no-cache-dir \
+      --ignore-installed \
+      PyYAML==6.0.1 \
+    && PYTHONPATH= python -m pip install --no-cache-dir \
       -c /tmp/constraints.txt \
       -r /tmp/strongsort-clean.txt \
       -r /tmp/yolov5-clean.txt \
       tensorboard==2.13.0 \
       pyrealsense2==2.55.1.6486
 
+
+# -----------------------------------------------------------------------------
+# Install official torchreid for StrongSORT
+# -----------------------------------------------------------------------------
+RUN rm -rf /opt/deep-person-reid \
+    && git clone https://github.com/KaiyangZhou/deep-person-reid.git \
+      /opt/deep-person-reid \
+    && cd /opt/deep-person-reid \
+    && git checkout f8cd150fdf77e8d9e1ed143b7f308c2c609ded50 \
+    && env -u PYTHONPATH PYTHONNOUSERSITE=1 \
+      "${CONDA_ENV}/bin/python" -m pip install \
+      --no-cache-dir \
+      --no-deps \
+      --no-build-isolation \
+      -e . \
+    && env -u PYTHONPATH PYTHONNOUSERSITE=1 \
+      "${CONDA_ENV}/bin/python" -c "import torchreid; \
+print('torchreid path:', torchreid.__file__); \
+from torchreid.metrics.distance import compute_distance_matrix; \
+print('torchreid installation OK')"
+
 # -----------------------------------------------------------------------------
 # Official torchreid expected by this StrongSORT implementation
 # -----------------------------------------------------------------------------
-RUN python -m pip uninstall -y torchreid || true \
-    && python -m pip install --no-cache-dir --no-deps \
-      "git+https://github.com/KaiyangZhou/deep-person-reid.git@f8cd150fdf77e8d9e1ed143b7f308c2c609ded50" \
-    && python -m pip install --no-cache-dir chardet==5.2.0
-
+RUN env -u PYTHONPATH PYTHONNOUSERSITE=1 \
+    "${CONDA_ENV}/bin/python" -c "import sys, numpy, torch; \
+    print('Python:', sys.executable); \
+    print('NumPy:', numpy.__version__); \
+    print('NumPy path:', numpy.__file__); \
+    print('torch:', torch.__version__); \
+    print('torch CUDA runtime:', torch.version.cuda); \
+    assert numpy.__version__ == '1.23.5', numpy.__version__; \
+    assert torch.__version__.startswith('2.7.1'), torch.__version__; \
+    assert torch.version.cuda == '12.8', torch.version.cuda"
 # -----------------------------------------------------------------------------
 # Build-time validation
 # GPU availability itself is checked when the container runs with --gpus all.
 # -----------------------------------------------------------------------------
-RUN python -c "import torch; \
-print('torch:', torch.__version__); \
-print('torch CUDA runtime:', torch.version.cuda); \
-assert torch.__version__.startswith('2.7.1'), torch.__version__; \
-assert torch.version.cuda == '12.8', torch.version.cuda"
+
 
 RUN source /opt/ros/noetic/setup.bash \
     && source /opt/ros_py310/setup.bash \
-    && python -c "import rospy; \
+    && export PYTHONPATH="$(printf '%s' "${PYTHONPATH:-}" \
+         | tr ':' '\n' \
+         | awk 'NF && $0 != "/usr/lib/python3/dist-packages" && !seen[$0]++' \
+         | paste -sd: -)" \
+    && PYTHONNOUSERSITE=1 "${CONDA_ENV}/bin/python" -c "import sys; \
+import numpy; \
+print('Python:', sys.executable); \
+print('PYTHONPATH entries:', sys.path); \
+print('NumPy:', numpy.__version__); \
+print('NumPy path:', numpy.__file__); \
+import rospy; \
 import cv2; \
 import cv_bridge; \
-import numpy; \
+import PyKDL; \
+import tf2_geometry_msgs; \
 import pyrealsense2; \
 from torchreid.metrics.distance import compute_distance_matrix; \
+assert numpy.__version__ == '1.23.5', numpy.__version__; \
+assert '/usr/lib/python3/dist-packages/numpy' not in numpy.__file__, numpy.__file__; \
 print('RTX 5070 runtime dependency check OK')"
 
 # -----------------------------------------------------------------------------

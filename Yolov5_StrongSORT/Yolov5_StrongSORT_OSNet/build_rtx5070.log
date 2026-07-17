@@ -1,0 +1,125 @@
+#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.rtx5070
+#1 transferring dockerfile: 12.10kB done
+#1 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 0.7s
+
+#3 docker-image://docker.io/docker/dockerfile:1@sha256:87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89
+#3 CACHED
+
+#4 [internal] load metadata for docker.io/nvidia/cuda:12.8.1-cudnn-runtime-ubuntu20.04
+#4 DONE 0.6s
+
+#5 [internal] load .dockerignore
+#5 transferring context: 2B done
+#5 DONE 0.0s
+
+#6 [ 1/18] FROM docker.io/nvidia/cuda:12.8.1-cudnn-runtime-ubuntu20.04@sha256:321d62f39872bb7cc169a3f18534cb8a772ea32f520363bd572bdf3783c88678
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 155B done
+#7 DONE 0.0s
+
+#8 [ 5/18] RUN python -m pip install --no-cache-dir --upgrade       pip==25.1.1       setuptools==75.8.2       wheel==0.45.1     && python -m pip install --no-cache-dir       catkin_pkg       rospkg       empy==3.3.4       numpy==1.23.5
+#8 CACHED
+
+#9 [ 8/18] RUN mkdir -p /opt/cv_bridge_ws/src     && git clone --depth 1 --branch noetic       https://github.com/ros-perception/vision_opencv.git       /opt/cv_bridge_ws/src/vision_opencv     && source /opt/ros/noetic/setup.bash     && catkin config       --workspace /opt/cv_bridge_ws       --extend /opt/ros/noetic       --install       --install-space /opt/ros_py310     && catkin build       --workspace /opt/cv_bridge_ws       cv_bridge       --no-status       --summarize       --cmake-args         -DCMAKE_BUILD_TYPE=Release         -DSETUPTOOLS_DEB_LAYOUT=OFF         -DPYTHON_EXECUTABLE=/opt/conda/envs/rosgpu/bin/python3         -DPYTHON_INCLUDE_DIR=/opt/conda/envs/rosgpu/include/python3.10         -DPYTHON_LIBRARY=/opt/conda/envs/rosgpu/lib/libpython3.10.so         -DBOOST_ROOT=/opt/boost-python310         -DBoost_NO_SYSTEM_PATHS=ON         -DBoost_INCLUDE_DIR=/opt/boost-python310/include         -DBoost_LIBRARY_DIR=/opt/boost-python310/lib         -DBoost_PYTHON_LIBRARY=/opt/boost-python310/lib/libboost_python3.so     && rm -rf /opt/cv_bridge_ws/build /opt/cv_bridge_ws/logs
+#9 CACHED
+
+#10 [ 6/18] RUN python -m pip install --no-cache-dir       torch==2.7.1       torchvision==0.22.1       --index-url https://download.pytorch.org/whl/cu128
+#10 CACHED
+
+#11 [ 3/18] RUN curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc       | gpg --dearmor -o /usr/share/keyrings/ros-archive-keyring.gpg     && echo "deb [signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros/ubuntu focal main"       > /etc/apt/sources.list.d/ros1.list     && apt-get update && apt-get install -y --no-install-recommends       python3-catkin-tools       python3-rosdep       ros-noetic-actionlib       ros-noetic-cv-bridge       ros-noetic-geometry-msgs       ros-noetic-image-transport       ros-noetic-message-filters       ros-noetic-message-generation       ros-noetic-message-runtime       ros-noetic-move-base-msgs       ros-noetic-ros-base       ros-noetic-sensor-msgs       ros-noetic-std-msgs       ros-noetic-tf2-geometry-msgs       ros-noetic-tf2-ros     && rm -rf /var/lib/apt/lists/*
+#11 CACHED
+
+#12 [ 7/18] RUN mkdir -p /tmp/boost-src     && cd /tmp/boost-src     && wget -q       "https://archives.boost.io/release/1.71.0/source/boost_1_71_0.tar.bz2"       -O boost.tar.bz2     && tar -xjf boost.tar.bz2     && cd "boost_1_71_0"     && sed -i 's/_Py_fopen(/fopen(/g' libs/python/src/exec.cpp     && ./bootstrap.sh       --prefix=/opt/boost-python310       --with-libraries=python       --with-python="/opt/conda/envs/rosgpu/bin/python3"       --with-python-root="/opt/conda/envs/rosgpu"     && ./b2 -j2       --with-python       variant=release       link=shared       threading=multi       runtime-link=shared       install     && cd /opt/boost-python310/lib     && BOOST_PY_LIB="$(find . -maxdepth 1 \( -type f -o -type l \)          | grep -E 'libboost_python(310|3).*\.so'          | head -n1)"     && test -n "${BOOST_PY_LIB}"     && ln -sf "$(basename "${BOOST_PY_LIB}")" libboost_python3.so     && rm -rf /tmp/boost-src
+#12 CACHED
+
+#13 [10/18] COPY requirements.txt /tmp/strongsort-requirements.txt
+#13 CACHED
+
+#14 [ 9/18] WORKDIR /opt/strongsort-build
+#14 CACHED
+
+#15 [11/18] COPY yolov5/requirements.txt /tmp/yolov5-requirements.txt
+#15 CACHED
+
+#16 [ 2/18] RUN apt-get update && apt-get install -y --no-install-recommends       bash-completion       build-essential       bzip2       ca-certificates       cmake       curl       ffmpeg       git       gnupg2       libeigen3-dev       libgl1       libglib2.0-0       libgomp1       libgtk2.0-dev       libjpeg-dev       libopenblas-dev       libopencv-dev       libpng-dev       libsm6       libxext6       libxrender1       locales       lsb-release       pkg-config       software-properties-common       unzip       wget     && locale-gen en_US.UTF-8 ja_JP.UTF-8     && rm -rf /var/lib/apt/lists/*
+#16 CACHED
+
+#17 [ 4/18] RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh       -O /tmp/miniconda.sh     && bash /tmp/miniconda.sh -b -p "/opt/conda"     && rm /tmp/miniconda.sh     && "/opt/conda/bin/conda" tos accept          --override-channels          --channel https://repo.anaconda.com/pkgs/main     && "/opt/conda/bin/conda" tos accept          --override-channels          --channel https://repo.anaconda.com/pkgs/r     && "/opt/conda/bin/conda" create -y          -p "/opt/conda/envs/rosgpu"          python=3.10 pip     && "/opt/conda/bin/conda" clean -afy
+#17 CACHED
+
+#18 [12/18] RUN sed -E       -e '/^[[:space:]]*torch([<>=!~ ].*)?([[:space:]]*#.*)?$/d'       -e '/^[[:space:]]*torchvision([<>=!~ ].*)?([[:space:]]*#.*)?$/d'       -e '/^[[:space:]]*tb-nightly([<>=!~ ].*)?([[:space:]]*#.*)?$/d'       -e '/^[[:space:]]*tensorboard([<>=!~ ].*)?([[:space:]]*#.*)?$/d'       -e '/^[[:space:]]*PyYAML([<>=!~ ].*)?([[:space:]]*#.*)?$/d'       /tmp/strongsort-requirements.txt       > /tmp/strongsort-clean.txt     && sed -E       -e '/^[[:space:]]*torch([<>=!~ ].*)?([[:space:]]*#.*)?$/d'       -e '/^[[:space:]]*torchvision([<>=!~ ].*)?([[:space:]]*#.*)?$/d'       -e '/^[[:space:]]*tensorboard([<>=!~ ].*)?([[:space:]]*#.*)?$/d'       -e '/^[[:space:]]*PyYAML([<>=!~ ].*)?([[:space:]]*#.*)?$/d'       /tmp/yolov5-requirements.txt       > /tmp/yolov5-clean.txt     && printf '%s\n'       'Cython==0.29.36'       'h5py==3.10.0'       'imageio==2.34.2'       'ipython==8.12.3'       'matplotlib==3.7.5'       'numpy==1.23.5'       'opencv-python==4.8.1.78'       'pandas==1.5.3'       'Pillow==9.5.0'       'protobuf==3.20.1'       'psutil==5.9.8'       'PyYAML==6.0.1'       'scipy==1.10.1'       'seaborn==0.12.2'       'tensorboard==2.13.0'       'tqdm==4.66.5'       > /tmp/constraints.txt     && PYTHONPATH= python -m pip install --no-cache-dir       --ignore-installed       PyYAML==6.0.1     && PYTHONPATH= python -m pip install --no-cache-dir       -c /tmp/constraints.txt       -r /tmp/strongsort-clean.txt       -r /tmp/yolov5-clean.txt       tensorboard==2.13.0       pyrealsense2==2.55.1.6486
+#18 CACHED
+
+#19 [13/18] RUN rm -rf /opt/deep-person-reid     && git clone https://github.com/KaiyangZhou/deep-person-reid.git       /opt/deep-person-reid     && cd /opt/deep-person-reid     && git checkout f8cd150fdf77e8d9e1ed143b7f308c2c609ded50     && env -u PYTHONPATH PYTHONNOUSERSITE=1       "/opt/conda/envs/rosgpu/bin/python" -m pip install       --no-cache-dir       --no-deps       --no-build-isolation       -e .     && env -u PYTHONPATH PYTHONNOUSERSITE=1       "/opt/conda/envs/rosgpu/bin/python" -c "import torchreid; print('torchreid path:', torchreid.__file__); from torchreid.metrics.distance import compute_distance_matrix; print('torchreid installation OK')"
+#19 0.023 Cloning into '/opt/deep-person-reid'...
+#19 1.267 Note: switching to 'f8cd150fdf77e8d9e1ed143b7f308c2c609ded50'.
+#19 1.267 
+#19 1.267 You are in 'detached HEAD' state. You can look around, make experimental
+#19 1.267 changes and commit them, and you can discard any commits you make in this
+#19 1.267 state without impacting any branches by switching back to a branch.
+#19 1.267 
+#19 1.267 If you want to create a new branch to retain commits you create, you may
+#19 1.267 do so (now or later) by using -c with the switch command. Example:
+#19 1.267 
+#19 1.267   git switch -c <new-branch-name>
+#19 1.267 
+#19 1.267 Or undo this operation with:
+#19 1.267 
+#19 1.267   git switch -
+#19 1.267 
+#19 1.267 Turn off this advice by setting config variable advice.detachedHead to false
+#19 1.267 
+#19 1.267 HEAD is now at f8cd150 Update README.rst
+#19 1.425 Obtaining file:///opt/deep-person-reid
+#19 1.425   Preparing metadata (setup.py): started
+#19 3.661   Preparing metadata (setup.py): finished with status 'done'
+#19 3.667 Installing collected packages: torchreid
+#19 3.667   Running setup.py develop for torchreid
+#19 3.667   DEPRECATION: Legacy editable install of torchreid==1.4.0 from file:///opt/deep-person-reid (setup.py develop) is deprecated. pip 25.3 will enforce this behaviour change. A possible replacement is to add a pyproject.toml or enable --use-pep517, and use setuptools >= 64. If the resulting installation is not behaving as expected, try using --config-settings editable_mode=compat. Please consult the setuptools documentation for more information. Discussion can be found at https://github.com/pypa/pip/issues/11457
+#19 7.395 Successfully installed torchreid
+#19 7.395 WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+#19 7.445 
+#19 7.445 [notice] A new release of pip is available: 25.1.1 -> 26.1.2
+#19 7.445 [notice] To update, run: pip install --upgrade pip
+#19 8.750 torchreid path: /opt/deep-person-reid/torchreid/__init__.py
+#19 8.750 torchreid installation OK
+#19 DONE 9.0s
+
+#20 [14/18] RUN env -u PYTHONPATH PYTHONNOUSERSITE=1     "/opt/conda/envs/rosgpu/bin/python" -c "import sys, numpy, torch;     print('Python:', sys.executable);     print('NumPy:', numpy.__version__);     print('NumPy path:', numpy.__file__);     print('torch:', torch.__version__);     print('torch CUDA runtime:', torch.version.cuda);     assert numpy.__version__ == '1.23.5', numpy.__version__;     assert torch.__version__.startswith('2.7.1'), torch.__version__;     assert torch.version.cuda == '12.8', torch.version.cuda"
+#20 0.685 Python: /opt/conda/envs/rosgpu/bin/python
+#20 0.685 NumPy: 1.23.5
+#20 0.685 NumPy path: /opt/conda/envs/rosgpu/lib/python3.10/site-packages/numpy/__init__.py
+#20 0.685 torch: 2.7.1+cu128
+#20 0.685 torch CUDA runtime: 12.8
+#20 DONE 0.8s
+
+#21 [15/18] RUN source /opt/ros/noetic/setup.bash     && source /opt/ros_py310/setup.bash     && export PYTHONPATH="$(printf '%s' "/opt/ros_py310/lib/python3.10/site-packages:/opt/ros_py310/lib/python3.10/dist-packages:/opt/ros_py310/lib/python3/dist-packages:/opt/ros/noetic/lib/python3/dist-packages"          | tr ':' '\n'          | awk 'NF && $0 != "/usr/lib/python3/dist-packages" && !seen[$0]++'          | paste -sd: -)"     && PYTHONNOUSERSITE=1 "/opt/conda/envs/rosgpu/bin/python" -c "import sys; import numpy; print('Python:', sys.executable); print('PYTHONPATH entries:', sys.path); print('NumPy:', numpy.__version__); print('NumPy path:', numpy.__file__); import rospy; import cv2; import cv_bridge; import pyrealsense2; from torchreid.metrics.distance import compute_distance_matrix; assert numpy.__version__ == '1.23.5', numpy.__version__; assert '/usr/lib/python3/dist-packages/numpy' not in numpy.__file__, numpy.__file__; print('RTX 5070 runtime dependency check OK')"
+#21 0.181 Python: /opt/conda/envs/rosgpu/bin/python
+#21 0.181 PYTHONPATH entries: ['', '/opt/ros_py310/lib/python3.10/site-packages', '/opt/ros_py310/lib/python3.10/dist-packages', '/opt/ros_py310/lib/python3/dist-packages', '/opt/ros/noetic/lib/python3/dist-packages', '/opt/conda/envs/rosgpu/lib/python310.zip', '/opt/conda/envs/rosgpu/lib/python3.10', '/opt/conda/envs/rosgpu/lib/python3.10/lib-dynload', '/opt/conda/envs/rosgpu/lib/python3.10/site-packages', '/opt/deep-person-reid']
+#21 0.181 NumPy: 1.23.5
+#21 0.181 NumPy path: /opt/conda/envs/rosgpu/lib/python3.10/site-packages/numpy/__init__.py
+#21 1.548 RTX 5070 runtime dependency check OK
+#21 DONE 1.9s
+
+#22 [16/18] COPY docker-entrypoint_rtx5070.sh /usr/local/bin/docker-entrypoint_rtx5070.sh
+#22 DONE 0.0s
+
+#23 [17/18] RUN chmod +x /usr/local/bin/docker-entrypoint_rtx5070.sh
+#23 DONE 0.0s
+
+#24 [18/18] WORKDIR /home/dars/catkin_ws
+#24 DONE 0.0s
+
+#25 exporting to image
+#25 exporting layers
+#25 exporting layers 20.1s done
+#25 writing image sha256:698b2bd232fa6d6ec153efacee398f0451fa05e58854ab3efc5f5c502f61d4ba done
+#25 naming to docker.io/library/yolov5-strongsort:rtx5070-cu128 done
+#25 DONE 20.1s
