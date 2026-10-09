@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-import os
-# limit the number of cpus used by high performance libraries
-os.environ["OMP_NUM_THREADS"] = "1"
-os.environ["OPENBLAS_NUM_THREADS"] = "1"
-os.environ["MKL_NUM_THREADS"] = "1"
-os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-os.environ["NUMEXPR_NUM_THREADS"] = "1"
-
 import pyrealsense2 as rs
 
 import argparse
@@ -27,6 +19,15 @@ FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
 if str(ROOT) not in sys.path:
     sys.path.append(str(ROOT))  # add ROOT to PATH
+
+
+import os
+# limit the number of cpus used by high performance libraries
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
 
 WEIGHTS = ROOT / 'weights'
 
@@ -58,7 +59,11 @@ camerainfo = CameraInfo()
 color_intr = rs.intrinsics()
 fps = 60.
 delay = 1/fps*0.5
-pubdata = yolov5_data()   
+pubdata = yolov5_data()
+
+# 5関節分の指令値を受信するまで空のメッセージを保持する
+cameraPosition = JointPositions()
+camera_position_ready = False
 
 def ImageCallback(depthdata, colordata):
     global color_frame
@@ -163,6 +168,21 @@ def rot_z(th):
   return Rz
 
 def CoordinateTransformation(x,y,z,color_intr):
+    global cameraPosition, camera_position_ready
+
+    # position_command未受信時に positions[0] へアクセスしない
+    if not camera_position_ready or len(cameraPosition.positions) < 5:
+        rospy.logwarn_throttle(2.0,
+            "Joint positions are not ready; skipping coordinate transformation")
+        return None
+
+    if not np.isfinite(z) or z <= 0.0:
+        rospy.logwarn_throttle(2.0,
+            "Invalid depth value received: %s; skipping detection", str(z))
+        return None
+
+    # コールバック更新との競合を避けるため、必要な値だけローカルへコピー
+    joint_values = [p.value for p in cameraPosition.positions[:5]]
 
     world_point = rs.rs2_deproject_pixel_to_point(color_intr , [x,y],z)
     from_eef_to_object=np.array([[-world_point[1]],[world_point[0]],[z]])
@@ -173,11 +193,11 @@ def CoordinateTransformation(x,y,z,color_intr):
     # q4 = DegToRad(-60)+DegToRad(102.5)
     # q5 = -DegToRad(0)+DegToRad(167.5)
 
-    test1 = -(cameraPosition.positions[0].value -DegToRad(169))
-    test2 = cameraPosition.positions[1].value - DegToRad(65)
-    test3 = cameraPosition.positions[2].value + DegToRad(146)
-    test4 = cameraPosition.positions[3].value - DegToRad(102.5)
-    test5 = -(cameraPosition.positions[4].value - DegToRad(167.5))
+    test1 = -(joint_values[0] - DegToRad(169))
+    test2 = joint_values[1] - DegToRad(65)
+    test3 = joint_values[2] + DegToRad(146)
+    test4 = joint_values[3] - DegToRad(102.5)
+    test5 = -(joint_values[4] - DegToRad(167.5))
     #print("DegToRad:::::" + str(DegToRad(q3)))
     #print("test :::::" + str(test3))
 
@@ -215,9 +235,17 @@ def CoordinateTransformation(x,y,z,color_intr):
 #Youbot_2_Position_get
 
 def position_callback(msg):
-    global cameraPosition
-    #rospy.loginfo("Message '{}' recieved".format(msg))
+    global cameraPosition, camera_position_ready
+
+    if len(msg.positions) < 5:
+        camera_position_ready = False
+        rospy.logwarn_throttle(2.0,
+            "Waiting for 5 joint positions from /arm_2/arm_controller/position_command "
+            "(received: %d)", len(msg.positions))
+        return
+
     cameraPosition = msg
+    camera_position_ready = True
 
 import tf2_ros
 import tf2_geometry_msgs
@@ -237,7 +265,7 @@ def run(
         iou_thres=0.45,  # NMS IOU threshold
         max_det=1000,  # maximum detections per image
         device='',  # cuda device, i.e. 0 or 0,1,2,3 or cpu
-        view_img=True,  # show results
+        view_img=False,  # show results
         save_txt=False,  # save results to *.txt
         save_conf=False,  # save confidences in --save-txt labels
         save_crop=False,  # save cropped prediction boxes
@@ -268,7 +296,6 @@ def run(
         global color_image
         global goal_status
 
-        rospy.init_node("ObjectDetection", anonymous=True)
         bridge = CvBridge()
 
         depth_sub = message_filters.Subscriber('/camera/aligned_depth_to_color/image_raw', Image)
@@ -300,35 +327,17 @@ def run(
         stride, names, pt = model.stride, model.names, model.pt
         imgsz = check_img_size(imgsz, s=stride)  # check image size
 
-        # # Dataloader
-        # webcam= False
-        # if webcam:
-        #     view_img = check_imshow()
-        #     cudnn.benchmark = True  # set True to speed up constant image size inference
-        #     dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt)
+        # Dataloader
+        webcam= False
+        if webcam:
+            view_img = check_imshow()
+            cudnn.benchmark = True  # set True to speed up constant image size inference
+            dataset = LoadStreams(source, img_size=imgsz, stride=stride, auto=pt)
             
-        #     bs = len(dataset)  # batch_size
-        # else:
-        #     dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
-        #     bs = 1  # batch_size
-        # ROS画像を直接使用するため、YOLOv5のファイル用Dataloaderは不要
-        webcam = False
-        bs = 1
-
-        # 後段のfor文を維持するためのダミー要素
-        dataset = [
-            (
-                str(ROOT),
-                None,
-                None,
-                None,
-                ""
-            )
-        ]
-
-        if device.type != "cpu":
-            cudnn.benchmark = True
-
+            bs = len(dataset)  # batch_size
+        else:
+            dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt)
+            bs = 1  # batch_size
         vid_path, vid_writer = [None] * bs, [None] * bs
 
 
@@ -365,54 +374,25 @@ def run(
         curr_frames, prev_frames = [None] * bs, [None] * bs
 
         pub = rospy.Publisher('/multi_command', Float32MultiArray, queue_size=10)
-        box_pub = rospy.Publisher('/box_command', Float32MultiArray, queue_size=10)
-        pub_box = rospy.Publisher(
-            "/multi_box_command",
-            yolov5_data,
-            queue_size=10
-        )
-
-        # 最後に処理したROS画像のタイムスタンプ
-        last_processed_stamp = None
-
+        box_pub = rospy.Publisher('/box_command',Float32MultiArray,queue_size=10)
+        pub_box = rospy.Publisher("/multi_box_command",yolov5_data,queue_size=10)
+        # precameraPosition = 0
+        # t_start = rospy.get_time()
+        # time_status = False
         while not rospy.is_shutdown():
-            current_color_frame = color_frame
-            current_depth_frame = depth_frame
-
-            if (
-                not getattr(current_color_frame, "encoding", "")
-                or not getattr(current_depth_frame, "encoding", "")
-            ):
+            if not getattr(color_frame, "encoding", "") or not getattr(depth_frame, "encoding", ""):
                 rospy.sleep(0.01)
                 continue
-
-            current_stamp = current_color_frame.header.stamp.to_nsec()
-
-            if current_stamp == last_processed_stamp:
-                rospy.sleep(0.001)
-                continue
-
-            last_processed_stamp = current_stamp
-
             try:
-                color_image = bridge.imgmsg_to_cv2(
-                    current_color_frame,
-                    "bgr8"
-                )
-                # depth_image = bridge.imgmsg_to_cv2(
-                #     current_depth_frame,
-                #     "32FC1"
-                # )
-                depth_image = bridge.imgmsg_to_cv2(
-                    current_depth_frame,
-                    "passthrough"
-                )
+                color_image = bridge.imgmsg_to_cv2(color_frame, 'bgr8')
+                depth_image = bridge.imgmsg_to_cv2(depth_frame, '32FC1')
+
 
             except CvBridgeError as e:
                 rospy.logerr(f"cv_bridge failed: {e}")
                 continue
                 
-            pubdata.header.stamp = current_color_frame.header.stamp
+            pubdata.header.stamp = color_frame.header.stamp
             
             time = rospy.get_time()
 
@@ -420,20 +400,15 @@ def run(
 
             for frame_idx, (path, im, im0s, vid_cap, s) in enumerate(dataset):
             # for path, im, im0s, vid_cap, s in dataset:
-                save_img = False
+                save_img = True
                 path = os.getcwd()
                 #ret,frames = cap.read()
                 #if not depth_image: continue
                 depth = depth_image
 
                 im0s = color_image
-                # depth_copy = depth.copy()
-                img = letterbox(
-                    im0s,
-                    new_shape=imgsz,
-                    stride=stride,
-                    auto=pt
-                )[0]
+                depth_copy = depth.copy()
+                img = letterbox(im0s)[0]
                 img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
                 im = np.ascontiguousarray(img)
                 t1 = time_sync()
@@ -484,16 +459,7 @@ def run(
                         confs = det[:, 4]
                         clss = det[:, 5]
                         #print("xywhs :::::::: " + str(xywhs))
-                        t_strongsort_start = time_sync()
-
                         outputs[i] = strongsort_list[i].update(xywhs.cpu(), confs.cpu(), clss.cpu(), im0)
-                        # StrongSORTを一時停止して速度比較
-                        t_strongsort_end = time_sync()
-                        # print(
-                        #     f"detections={len(det)}, "
-                        #     f"StrongSORT={(t_strongsort_end - t_strongsort_start) * 1000:.1f} ms"
-                        # )
-                        # outputs[i] = []
                         detect = []
                         detect_box = []
                         boxs = []
@@ -515,41 +481,23 @@ def run(
                                         if(d1 > 50 and d1 < 590):
                                             # print(d1)
                                             #print("d1 d2 ::::::::::" + str(d1) +  "::::::::::: " + str(d2))
-                                            # zDepth = depth[int(d2),int(d1)]
-                                            x = output[0] + (output[2] - output[0])/2
-                                            y = output[1] + (output[3] - output[1])/2                                            
-                                            z_raw = float(depth[int(d2), int(d1)])
+                                            zDepth = depth[int(d2),int(d1)]
 
-                                            if current_depth_frame.encoding in ("16UC1", "mono16"):
-                                                z_m = z_raw * 0.001
-                                            elif current_depth_frame.encoding == "32FC1":
-                                                z_m = z_raw
-                                            else:
-                                                rospy.logwarn_throttle(
-                                                    5.0,
-                                                    f"Unsupported depth encoding: "
-                                                    f"{current_depth_frame.encoding}"
-                                                )
+
+                                            x = output[0] + (output[2] - output[0])/2
+                                            y = output[1] + (output[3] - output[1])/2
+
+                                            object2base = CoordinateTransformation(x, y, zDepth/1000, color_intr)
+                                            if object2base is None:
                                                 continue
 
-                                            object2base = CoordinateTransformation(
-                                                x,
-                                                y,
-                                                z_m,
-                                                color_intr
-                                            )
-
-
-
-
-                                            # object2base = CoordinateTransformation(x,y,zDepth/1000,color_intr)
-
-                                            # world_point = rs.rs2_deproject_pixel_to_point(color_intr , [x,y],zDepth/1000)
+                                            world_point = rs.rs2_deproject_pixel_to_point(
+                                                color_intr, [x, y], zDepth/1000)
 
 
                                                                                 
                                             label = None if hide_labels else (f'{id} {names[c]}' if hide_conf else \
-                                            (f'{id} {conf:.2f}' if hide_class else f'{id} {c} {float(object2base[0][0]):.2f} {float(-object2base[1][0]):.2f} {float(object2base[2][0]):.2f}'))
+                                            (f'{id} {conf:.2f}' if hide_class else f'{id} {c} {float(object2base[0][0]):.2f} {float(object2base[1][0]):.2f} {float(object2base[2][0]):.2f}'))
 
 
 
@@ -573,17 +521,15 @@ def run(
                         LOGGER.info('No detections')
                     
                     # Write results
-                    # Write results
-                    if view_img:
-                        im0 = annotator.result()
-                        cv2.imshow(str(p), im0)
-
-    
+                    im0 = annotator.result()
+                    cv2.imshow(str(p), im0)
+                    #cv2.imshow("depth_img",depth_copy)
+                    cv2.waitKey(1)  # 1 millisecond
                     prev_frames[i] = curr_frames[i]
                 
                 LOGGER.info(f'{s}Done. ({t3 - t2:.3f}s)')
 
-            key = cv2.waitKey(1) if view_img else -1
+            key = cv2.waitKey(1)
             # Press esc or 'q' to close the image window
             if key & 0xFF == ord('q') or key == 27:
                 cv2.destroyAllWindows()
@@ -657,8 +603,14 @@ if __name__ == "__main__":
     color_intr = rs.intrinsics()
 
 
-    cameraPosition_sub = rospy.Subscriber("arm_2/arm_controller/position_command", JointPositions, position_callback)
-    cameraPosition = JointPositions()
+    # cameraPosition は購読開始前に初期化済み。購読後に空メッセージで上書きしない。
+    cameraPosition_sub = rospy.Subscriber(
+        "/arm_2/arm_controller/position_command",
+        JointPositions,
+        position_callback,
+        queue_size=1
+    )
+    rospy.loginfo("Waiting for 5 joint positions from /arm_2/arm_controller/position_command")
 
     opt = parse_opt()
     main(opt)
