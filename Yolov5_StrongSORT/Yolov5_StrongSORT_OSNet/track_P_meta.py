@@ -16,7 +16,9 @@ import message_filters
 import numpy as np
 import rospy
 from cv_bridge import CvBridge, CvBridgeError
+from geometry_msgs.msg import PointStamped, PoseStamped
 from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import Float32MultiArray
 from tf2_msgs.msg import TFMessage
 
 
@@ -33,9 +35,15 @@ DEPTH_TOPIC = "/meta_depth_image"
 COLOR_INFO_TOPIC = "/meta_color_camera_info"
 DEPTH_INFO_TOPIC = "/meta_depth_camera_info"
 META_TF_TOPIC = "/meta_tf"
+META_COLOR_POSE_QR_TOPIC = "/meta_color_pose_qr"
+QRP_POSITION_TOPIC = "/QRposition"
+META_OBJECT_POSITION_BASE_TOPIC = "/meta_object_position_base"
+P_YOLO_TOPIC = "/P_yolo"
 
 COLOR_FRAME = "quest_color_left_optical"
 DEPTH_FRAME = "quest_depth_left_optical"
+QR_FRAME = "qr_main"
+ROBOT_BASE_FRAME = "robot_base"
 
 
 def stamp_to_seconds(stamp):
@@ -77,6 +85,12 @@ class MetaOverlayNode:
         self.color_info = None
         self.depth_info = None
         self.latest_tf = None
+        self.qr_from_base = None
+        self.base_from_qr = None
+        self.qr_position_frame_id = None
+        self.qr_position_stamp = None
+        self.qr_position_logged = False
+        self.meta_pose_logged = False
 
         self.logged_color_signature = None
         self.logged_depth_signature = None
@@ -99,18 +113,31 @@ class MetaOverlayNode:
         if self.yolo_enabled:
             self._load_yolo()
 
+        self.test_point_enabled = rospy.get_param("~test_point_enabled", False)
+        self.test_point_u = int(rospy.get_param("~test_point_u", 320))
+        self.test_point_v = int(rospy.get_param("~test_point_v", 240))
+        self.publish_p_yolo = rospy.get_param("~publish_p_yolo", True)
+        self.object_position_pub = rospy.Publisher(
+            META_OBJECT_POSITION_BASE_TOPIC,
+            PointStamped,
+            queue_size=10,
+        )
+        self.p_yolo_pub = rospy.Publisher(P_YOLO_TOPIC, Float32MultiArray, queue_size=10)
+
         # CameraInfo and /meta_tf are deliberately ordinary subscribers.
         # No tf2_ros.TransformListener and no /tf subscription are used here.
         rospy.Subscriber(COLOR_INFO_TOPIC, CameraInfo, self.color_info_callback, queue_size=1)
         rospy.Subscriber(DEPTH_INFO_TOPIC, CameraInfo, self.depth_info_callback, queue_size=1)
         rospy.Subscriber(META_TF_TOPIC, TFMessage, self.meta_tf_callback, queue_size=20)
+        rospy.Subscriber(QRP_POSITION_TOPIC, PoseStamped, self.qr_position_callback, queue_size=1)
 
         color_sub = message_filters.Subscriber(COLOR_TOPIC, Image)
         depth_sub = message_filters.Subscriber(DEPTH_TOPIC, Image)
+        color_pose_qr_sub = message_filters.Subscriber(META_COLOR_POSE_QR_TOPIC, PoseStamped)
         slop = rospy.get_param("~sync_slop", 0.10)
         queue_size = rospy.get_param("~sync_queue_size", 10)
         self.image_sync = message_filters.ApproximateTimeSynchronizer(
-            [color_sub, depth_sub],
+            [color_sub, depth_sub, color_pose_qr_sub],
             queue_size=int(queue_size),
             slop=float(slop),
             allow_headerless=False,
@@ -130,7 +157,245 @@ class MetaOverlayNode:
         rospy.loginfo("ColorInfo topic: %s", COLOR_INFO_TOPIC)
         rospy.loginfo("DepthInfo topic: %s", DEPTH_INFO_TOPIC)
         rospy.loginfo("Private TF topic: %s (standard /tf is not used)", META_TF_TOPIC)
+        rospy.loginfo("Color pose relative to QR topic: %s", META_COLOR_POSE_QR_TOPIC)
+        rospy.loginfo("Cached robot-to-QR pose topic: %s", QRP_POSITION_TOPIC)
+        rospy.loginfo("Output frame: %s", ROBOT_BASE_FRAME)
+        rospy.loginfo("QR detection is not performed in this node")
         rospy.loginfo("TF direction: depth(%s) -> color(%s), invert=%s", DEPTH_FRAME, COLOR_FRAME, self.invert_meta_tf)
+        if self.test_point_enabled:
+            rospy.loginfo(
+                "Known-point verification enabled: depth pixel=(%d, %d)",
+                self.test_point_u,
+                self.test_point_v,
+            )
+        if not self.publish_p_yolo:
+            rospy.loginfo("/P_yolo publishing disabled by ~publish_p_yolo")
+
+        self._check_topic_presence()
+
+    def _check_topic_presence(self):
+        """Report required pose topics without substituting another world frame."""
+        required = (
+            (META_COLOR_POSE_QR_TOPIC, "geometry_msgs/PoseStamped"),
+            (QRP_POSITION_TOPIC, "geometry_msgs/PoseStamped"),
+        )
+        try:
+            published = dict(rospy.get_published_topics())
+        except Exception as exc:
+            rospy.logwarn("Could not inspect ROS topic types: %s", exc)
+            return
+
+        for topic, expected_type in required:
+            actual_type = published.get(topic)
+            if actual_type is None:
+                rospy.logerr(
+                    "%s is not currently published. The node will not use Meta world coordinates; "
+                    "the placed QRPosition-relative color pose is required.",
+                    topic,
+                )
+            else:
+                rospy.loginfo("Topic check: %s type=%s (expected %s)", topic, actual_type, expected_type)
+
+    @staticmethod
+    def _pose_stamped_to_matrix(pose_msg):
+        """Convert a PoseStamped pose to the transform implied by its header frame."""
+        rotation = quaternion_to_rotation_matrix(pose_msg.pose.orientation)
+        translation = np.array(
+            [
+                pose_msg.pose.position.x,
+                pose_msg.pose.position.y,
+                pose_msg.pose.position.z,
+            ],
+            dtype=np.float64,
+        )
+        transform = np.eye(4, dtype=np.float64)
+        transform[:3, :3] = rotation
+        transform[:3, 3] = translation
+        return transform
+
+    @staticmethod
+    def _transform_point(transform, point):
+        point_h = np.ones(4, dtype=np.float64)
+        point_h[:3] = np.asarray(point, dtype=np.float64)
+        return (transform.dot(point_h))[:3]
+
+    def qr_position_callback(self, msg):
+        """Cache /QRposition once as T_qr_from_base; ignore later messages."""
+        with self.lock:
+            if self.qr_from_base is not None:
+                return
+
+        try:
+            qr_from_base = self._pose_stamped_to_matrix(msg)
+            base_from_qr = np.linalg.inv(qr_from_base)
+        except (ValueError, np.linalg.LinAlgError) as exc:
+            rospy.logerr("Invalid initial /QRposition; it was not cached: %s", exc)
+            return
+
+        with self.lock:
+            if self.qr_from_base is not None:
+                return
+            self.qr_from_base = qr_from_base
+            self.base_from_qr = base_from_qr
+            self.qr_position_frame_id = msg.header.frame_id
+            self.qr_position_stamp = msg.header.stamp
+
+        if msg.header.frame_id != ROBOT_BASE_FRAME:
+            rospy.logwarn(
+                "/QRposition frame_id=%s, expected %s. Per the requested contract it is treated as "
+                "T_qr_from_base without an additional frame conversion.",
+                msg.header.frame_id or "<empty>",
+                ROBOT_BASE_FRAME,
+            )
+
+        # PoseStamped has header.frame_id but no child_frame_id. Do not invent
+        # a child frame or infer an extra transform from the message.
+        rospy.loginfo(
+            "Cached initial /QRposition as T_qr_from_base: frame_id=%s "
+            "position=[%.6f, %.6f, %.6f] orientation_xyzw=[%.6f, %.6f, %.6f, %.6f] "
+            "(PoseStamped has no child_frame_id)",
+            msg.header.frame_id or "<empty>",
+            msg.pose.position.x,
+            msg.pose.position.y,
+            msg.pose.position.z,
+            msg.pose.orientation.x,
+            msg.pose.orientation.y,
+            msg.pose.orientation.z,
+            msg.pose.orientation.w,
+        )
+
+    def _get_base_from_qr(self):
+        with self.lock:
+            if self.base_from_qr is None:
+                return None
+            return self.base_from_qr.copy()
+
+    def _log_color_pose_qr_message(self, color_pose_qr_msg):
+        if self.meta_pose_logged:
+            return
+        self.meta_pose_logged = True
+        rospy.loginfo(
+            "Using /meta_color_pose_qr as T_qr_from_color: frame_id=%s "
+            "stamp=%.6f position=[%.6f, %.6f, %.6f] "
+            "orientation_xyzw=[%.6f, %.6f, %.6f, %.6f]",
+            color_pose_qr_msg.header.frame_id or "<empty>",
+            stamp_to_seconds(color_pose_qr_msg.header.stamp),
+            color_pose_qr_msg.pose.position.x,
+            color_pose_qr_msg.pose.position.y,
+            color_pose_qr_msg.pose.position.z,
+            color_pose_qr_msg.pose.orientation.x,
+            color_pose_qr_msg.pose.orientation.y,
+            color_pose_qr_msg.pose.orientation.z,
+            color_pose_qr_msg.pose.orientation.w,
+        )
+
+    def _color_pose_to_base(self, color_point, color_pose_qr_msg):
+        """Apply T_qr_from_color and inverse(T_qr_from_base)."""
+        try:
+            qr_from_color = self._pose_stamped_to_matrix(color_pose_qr_msg)
+        except ValueError as exc:
+            rospy.logwarn_throttle(2.0, "Invalid /meta_color_pose_qr orientation: %s", exc)
+            return None
+
+        if color_pose_qr_msg.header.frame_id != QR_FRAME:
+            rospy.logwarn_throttle(
+                5.0,
+                "/meta_color_pose_qr frame_id=%s, expected %s; using the message as T_qr_from_color",
+                color_pose_qr_msg.header.frame_id or "<empty>",
+                QR_FRAME,
+            )
+
+        base_from_qr = self._get_base_from_qr()
+        if base_from_qr is None:
+            return None
+
+        point_qr = self._transform_point(qr_from_color, color_point)
+        return self._transform_point(base_from_qr, point_qr)
+
+    def _depth_to_color_point(self, point_depth, tf_record):
+        """Apply p_color = T_color_from_depth * p_depth using /meta_tf."""
+        rotation = tf_record["rotation"]
+        translation = tf_record["translation"]
+        if self.invert_meta_tf:
+            rotation = rotation.T
+            translation = -rotation.dot(translation)
+        return rotation.dot(np.asarray(point_depth, dtype=np.float64)) + translation
+
+    def _publish_base_point(self, point_base, stamp):
+        message = PointStamped()
+        message.header.stamp = stamp
+        message.header.frame_id = ROBOT_BASE_FRAME
+        message.point.x = float(point_base[0])
+        message.point.y = float(point_base[1])
+        message.point.z = float(point_base[2])
+        self.object_position_pub.publish(message)
+
+    def _publish_p_yolo(self, bottle_positions_base):
+        """Publish existing /P_yolo Float32MultiArray records (12 floats/object)."""
+        if not self.publish_p_yolo:
+            return
+
+        covariance = np.diag([0.005 ** 2, 0.005 ** 2, 0.010 ** 2])
+        message = Float32MultiArray()
+        for point_base in bottle_positions_base:
+            # Keep the existing track_P_yolo record layout:
+            # mean XYZ (3) + row-major 3x3 covariance (9).
+            message.data.extend(
+                np.asarray(point_base, dtype=np.float32).tolist()
+                + covariance.astype(np.float32).reshape(-1).tolist()
+            )
+        self.p_yolo_pub.publish(message)
+
+    def _verify_known_depth_point(self, depth, depth_info, tf_record, color_pose_qr_msg, stamp):
+        """Validate the requested depth->color->QR->base chain with one known pixel."""
+        u = self.test_point_u
+        v = self.test_point_v
+        if not (0 <= v < depth.shape[0] and 0 <= u < depth.shape[1]):
+            rospy.logwarn_throttle(
+                2.0,
+                "Known test pixel (%d, %d) is outside depth image %s",
+                u,
+                v,
+                depth.shape,
+            )
+            return
+
+        z = float(depth[v, u])
+        if not np.isfinite(z) or z <= 0.0:
+            rospy.logwarn_throttle(2.0, "Known test pixel (%d, %d) has invalid depth=%s", u, v, z)
+            return
+
+        kd = depth_info["K"]
+        point_depth = np.array(
+            [
+                (u - kd[0, 2]) * z / kd[0, 0],
+                (v - kd[1, 2]) * z / kd[1, 1],
+                z,
+            ],
+            dtype=np.float64,
+        )
+        point_color = self._depth_to_color_point(point_depth, tf_record)
+        point_base = self._color_pose_to_base(point_color, color_pose_qr_msg)
+        if point_base is None:
+            rospy.logwarn_throttle(2.0, "Known-point verification is waiting for initial /QRposition")
+            return
+
+        self._publish_base_point(point_base, stamp)
+        rospy.loginfo_throttle(
+            2.0,
+            "Known-point chain depth=(%.4f, %.4f, %.4f) color=(%.4f, %.4f, %.4f) "
+            "base=(%.4f, %.4f, %.4f) frame_id=%s",
+            point_depth[0],
+            point_depth[1],
+            point_depth[2],
+            point_color[0],
+            point_color[1],
+            point_color[2],
+            point_base[0],
+            point_base[1],
+            point_base[2],
+            ROBOT_BASE_FRAME,
+        )
 
     def _load_yolo(self):
         """Load the local YOLOv5 model without importing RealSense or robot code."""
@@ -322,6 +587,9 @@ class MetaOverlayNode:
         cx_d, cy_d = kd[0, 2], kd[1, 2]
         fx_c, fy_c = kc[0, 0], kc[1, 1]
         cx_c, cy_c = kc[0, 2], kc[1, 2]
+        color_height = int(color_info["height"])
+        color_width = int(color_info["width"])
+        point_buffer_color = np.zeros((color_height, color_width, 3), dtype=np.float64)
 
         if fx_d == 0.0 or fy_d == 0.0 or fx_c == 0.0 or fy_c == 0.0:
             raise ValueError("CameraInfo contains a zero focal length")
@@ -329,7 +597,13 @@ class MetaOverlayNode:
         valid = np.isfinite(depth) & (depth > 0.0)
         valid_count = int(np.count_nonzero(valid))
         if valid_count == 0:
-            return np.zeros((int(color_info["height"]), int(color_info["width"])), dtype=np.float32), 0, 0, valid_count
+            return (
+                np.zeros((color_height, color_width), dtype=np.float32),
+                point_buffer_color,
+                0,
+                0,
+                valid_count,
+            )
 
         v_d, u_d = np.nonzero(valid)
         z_d = depth[v_d, u_d].astype(np.float64, copy=False)
@@ -349,22 +623,21 @@ class MetaOverlayNode:
         z_c = points_c[:, 2]
         valid_z = np.isfinite(z_c) & (z_c > 0.0)
         if not np.any(valid_z):
-            return np.zeros((int(color_info["height"]), int(color_info["width"])), dtype=np.float32), 0, 0, valid_count
+            return np.zeros((color_height, color_width), dtype=np.float32), point_buffer_color, 0, 0, valid_count
 
         points_c = points_c[valid_z]
         z_c = z_c[valid_z]
         u_c = np.rint(fx_c * points_c[:, 0] / z_c + cx_c).astype(np.int32)
         v_c = np.rint(fy_c * points_c[:, 1] / z_c + cy_c).astype(np.int32)
 
-        color_height = int(color_info["height"])
-        color_width = int(color_info["width"])
         in_bounds = (u_c >= 0) & (u_c < color_width) & (v_c >= 0) & (v_c < color_height)
         if not np.any(in_bounds):
-            return np.zeros((color_height, color_width), dtype=np.float32), 0, 0, valid_count
+            return np.zeros((color_height, color_width), dtype=np.float32), point_buffer_color, 0, 0, valid_count
 
         u_c = u_c[in_bounds]
         v_c = v_c[in_bounds]
         z_c = z_c[in_bounds]
+        points_c = points_c[in_bounds]
         color_indices = v_c.astype(np.int64) * color_width + u_c.astype(np.int64)
         projected_count = int(color_indices.size)
 
@@ -379,7 +652,8 @@ class MetaOverlayNode:
 
         z_buffer = np.zeros((color_height, color_width), dtype=np.float32)
         z_buffer[v_c[chosen], u_c[chosen]] = z_c[chosen].astype(np.float32)
-        return z_buffer, projected_count, int(chosen.size), valid_count
+        point_buffer_color[v_c[chosen], u_c[chosen]] = points_c[chosen]
+        return z_buffer, point_buffer_color, projected_count, int(chosen.size), valid_count
 
     @staticmethod
     def _make_overlay(color_bgr, z_buffer):
@@ -515,10 +789,12 @@ class MetaOverlayNode:
         return str(class_id)
 
     @staticmethod
-    def _depth_at_color_pixel(z_buffer, u, v):
-        height, width = z_buffer.shape
-        if 0 <= u < width and 0 <= v < height and z_buffer[v, u] > 0.0:
-            return float(z_buffer[v, u])
+    def _point_at_color_pixel(point_buffer_color, u, v):
+        height, width = point_buffer_color.shape[:2]
+        if 0 <= u < width and 0 <= v < height:
+            point = point_buffer_color[v, u]
+            if np.all(np.isfinite(point)) and np.linalg.norm(point) > 0.0:
+                return point.copy()
 
         # Bounding-box centers can fall on a hole in the projected Z-buffer.
         # Use a small valid neighborhood only as a display fallback.
@@ -527,18 +803,16 @@ class MetaOverlayNode:
         x1 = min(width, u + radius + 1)
         y0 = max(0, v - radius)
         y1 = min(height, v + radius + 1)
-        neighborhood = z_buffer[y0:y1, x0:x1]
-        valid = neighborhood[neighborhood > 0.0]
-        return float(np.median(valid)) if valid.size else 0.0
+        neighborhood = point_buffer_color[y0:y1, x0:x1].reshape(-1, 3)
+        valid = neighborhood[np.isfinite(neighborhood).all(axis=1)]
+        valid = valid[np.linalg.norm(valid, axis=1) > 0.0]
+        return np.median(valid, axis=0) if valid.size else None
 
-    def _annotate_yolo(self, color_bgr, detections, z_buffer, color_info):
-        """Draw YOLO boxes and report the projected Color-camera depth."""
+    def _annotate_yolo(self, color_bgr, detections, point_buffer_color, color_pose_qr_msg):
+        """Draw YOLO boxes and show bottle coordinates in robot_base."""
         annotated = color_bgr.copy()
         detection_count = 0
-        fx_c = color_info["K"][0, 0]
-        fy_c = color_info["K"][1, 1]
-        cx_c = color_info["K"][0, 2]
-        cy_c = color_info["K"][1, 2]
+        bottle_positions_base = []
 
         for detection in detections:
             x1, y1, x2, y2 = [int(value) for value in detection[:4]]
@@ -547,16 +821,22 @@ class MetaOverlayNode:
             class_name = self._class_name(class_id)
             center_u = int(round((x1 + x2) * 0.5))
             center_v = int(round((y1 + y2) * 0.5))
-            z_c = self._depth_at_color_pixel(z_buffer, center_u, center_v)
+            point_color = self._point_at_color_pixel(point_buffer_color, center_u, center_v)
 
             label = "{} {:.2f}".format(class_name, confidence)
             coordinate_label = None
-            if class_name.lower() == "bottle" and z_c > 0.0:
-                x_c = (center_u - cx_c) * z_c / fx_c
-                y_c = (center_v - cy_c) * z_c / fy_c
-                coordinate_label = "XYZ=({:.2f}, {:.2f}, {:.2f})m".format(x_c, y_c, z_c)
-            elif class_name.lower() == "bottle":
-                coordinate_label = "XYZ=NA"
+            if class_name.lower() == "bottle":
+                if point_color is None:
+                    coordinate_label = "base XYZ=NA(depth)"
+                else:
+                    point_base = self._color_pose_to_base(point_color, color_pose_qr_msg)
+                    if point_base is None:
+                        coordinate_label = "base XYZ=WAIT(/QRposition)"
+                    else:
+                        coordinate_label = "base XYZ=({:.2f}, {:.2f}, {:.2f})m".format(
+                            point_base[0], point_base[1], point_base[2]
+                        )
+                        bottle_positions_base.append(point_base)
 
             color = (0, 255, 0)
             cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
@@ -565,7 +845,7 @@ class MetaOverlayNode:
                 self._draw_label(annotated, coordinate_label, x1, y1 + 24, color)
             detection_count += 1
 
-        return annotated, detection_count
+        return annotated, detection_count, bottle_positions_base
 
     @staticmethod
     def _draw_label(image, text, x, y, color):
@@ -590,9 +870,9 @@ class MetaOverlayNode:
             cv2.LINE_AA,
         )
 
-    def _run_yolo(self, color_bgr, z_buffer, color_info):
+    def _run_yolo(self, color_bgr, point_buffer_color, color_pose_qr_msg):
         if self.yolo_model is None:
-            return color_bgr, 0
+            return color_bgr, 0, []
 
         try:
             from yolov5.utils.augmentations import letterbox
@@ -601,7 +881,7 @@ class MetaOverlayNode:
             # Prevent overlapping inference callbacks if the camera rate is
             # higher than the selected YOLO model can process.
             if not self.yolo_inference_lock.acquire(blocking=False):
-                return color_bgr, 0
+                return color_bgr, 0, []
             try:
                 image, _, _ = letterbox(
                     color_bgr,
@@ -629,21 +909,21 @@ class MetaOverlayNode:
                 )
                 detections = prediction[0]
                 if detections is None or not len(detections):
-                    return color_bgr, 0
+                    return color_bgr, 0, []
 
                 detections[:, :4] = scale_coords(
                     tensor.shape[2:],
                     detections[:, :4],
                     color_bgr.shape,
                 ).round()
-                return self._annotate_yolo(color_bgr, detections, z_buffer, color_info)
+                return self._annotate_yolo(color_bgr, detections, point_buffer_color, color_pose_qr_msg)
             finally:
                 self.yolo_inference_lock.release()
         except Exception as exc:
             rospy.logerr_throttle(2.0, "YOLO inference failed: %s", exc)
-            return color_bgr, 0
+            return color_bgr, 0, []
 
-    def image_callback(self, color_msg, depth_msg):
+    def image_callback(self, color_msg, depth_msg, color_pose_qr_msg):
         color_signature = (color_msg.encoding, color_msg.width, color_msg.height, color_msg.header.frame_id)
         depth_signature = (depth_msg.encoding, depth_msg.width, depth_msg.height, depth_msg.header.frame_id)
         if color_signature != self.logged_color_signature:
@@ -675,10 +955,19 @@ class MetaOverlayNode:
             rospy.logwarn_throttle(2.0, "Waiting for /meta_tf %s -> %s", COLOR_FRAME, DEPTH_FRAME)
             return
 
+        if color_pose_qr_msg.header.frame_id and color_pose_qr_msg.header.frame_id != QR_FRAME:
+            rospy.logwarn_throttle(
+                5.0,
+                "/meta_color_pose_qr frame_id=%s, expected %s",
+                color_pose_qr_msg.header.frame_id,
+                QR_FRAME,
+            )
+        self._log_color_pose_qr_message(color_pose_qr_msg)
+
         try:
             color_bgr = self._convert_color(color_msg)
             depth = self._convert_depth(depth_msg)
-            z_buffer, projected_count, zbuffer_count, valid_count = self._project_depth(
+            z_buffer, point_buffer_color, projected_count, zbuffer_count, valid_count = self._project_depth(
                 depth,
                 depth_info,
                 color_info,
@@ -717,15 +1006,32 @@ class MetaOverlayNode:
             tf_delta,
         )
 
-        if not self.display_enabled:
-            return
+        if self.test_point_enabled:
+            self._verify_known_depth_point(
+                depth,
+                depth_info,
+                tf_record,
+                color_pose_qr_msg,
+                color_msg.header.stamp,
+            )
 
-        yolo_image, detection_count = self._run_yolo(color_bgr, z_buffer, color_info)
+        yolo_image, detection_count, bottle_positions_base = self._run_yolo(
+            color_bgr,
+            point_buffer_color,
+            color_pose_qr_msg,
+        )
+        for point_base in bottle_positions_base:
+            self._publish_base_point(point_base, color_msg.header.stamp)
+        self._publish_p_yolo(bottle_positions_base)
         rospy.loginfo_throttle(
             2.0,
-            "YOLO detections=%d",
+            "YOLO detections=%d bottles_in_robot_base=%d",
             detection_count,
+            len(bottle_positions_base),
         )
+
+        if not self.display_enabled:
+            return
 
         display = self._make_debug_view(
             color_bgr,
