@@ -82,7 +82,12 @@ class MetaOverlayNode:
         self.logged_depth_signature = None
         self.display_lock = threading.Lock()
         self.latest_display = None
+        self.display_dirty = False
+        self.window_created = False
         self.display_enabled = rospy.get_param("~display", True)
+        self.display_scale = float(rospy.get_param("~display_scale", 1.0))
+        if self.display_scale <= 0.0:
+            self.display_scale = 1.0
         self.invert_meta_tf = rospy.get_param("~invert_meta_tf", False)
         self.tf_history_size = rospy.get_param("~tf_history_size", 200)
         self.tf_history = deque(maxlen=max(1, int(self.tf_history_size)))
@@ -117,19 +122,13 @@ class MetaOverlayNode:
         )
         self.image_sync.registerCallback(self.image_callback)
 
-        if self.display_enabled:
-            try:
-                cv2.namedWindow("Meta Quest Depth Overlay", cv2.WINDOW_NORMAL)
-            except cv2.error as exc:
-                self.display_enabled = False
-                rospy.logwarn("OpenCV window is unavailable: %s", exc)
-
         rospy.loginfo("Meta Quest overlay node started")
         rospy.loginfo("Color topic: %s", COLOR_TOPIC)
         rospy.loginfo("Depth topic: %s", DEPTH_TOPIC)
         rospy.loginfo("ColorInfo topic: %s", COLOR_INFO_TOPIC)
         rospy.loginfo("DepthInfo topic: %s", DEPTH_INFO_TOPIC)
         rospy.loginfo("Private TF topic: %s (standard /tf is not used)", META_TF_TOPIC)
+        rospy.loginfo("OpenCV display scale: %.2f", self.display_scale)
         rospy.loginfo("TF direction: depth(%s) -> color(%s), invert=%s", DEPTH_FRAME, COLOR_FRAME, self.invert_meta_tf)
 
     def _load_yolo(self):
@@ -436,8 +435,7 @@ class MetaOverlayNode:
         debug[ys[sample_indices], xs[sample_indices]] = (0, 255, 0)
         return debug
 
-    @staticmethod
-    def _label_and_resize(image, label):
+    def _label_and_resize(self, image, label):
         labeled = image.copy()
         cv2.rectangle(labeled, (0, 0), (labeled.shape[1] - 1, 30), (0, 0, 0), -1)
         cv2.putText(
@@ -450,7 +448,10 @@ class MetaOverlayNode:
             1,
             cv2.LINE_AA,
         )
-        return cv2.resize(labeled, (labeled.shape[1] // 2, labeled.shape[0] // 2), interpolation=cv2.INTER_AREA)
+        target_width = max(1, int(round(labeled.shape[1] * self.display_scale)))
+        target_height = max(1, int(round(labeled.shape[0] * self.display_scale)))
+        interpolation = cv2.INTER_AREA if self.display_scale < 1.0 else cv2.INTER_NEAREST
+        return cv2.resize(labeled, (target_width, target_height), interpolation=interpolation)
 
     def _make_debug_view(
         self,
@@ -739,17 +740,24 @@ class MetaOverlayNode:
         )
         with self.display_lock:
             self.latest_display = display
+            self.display_dirty = True
 
     def show_latest(self):
         """Update the GUI from the main thread instead of a ROS callback thread."""
         if not self.display_enabled:
             return
         with self.display_lock:
-            if self.latest_display is None:
-                return
-            display = self.latest_display.copy()
+            if self.latest_display is not None and self.display_dirty:
+                display = self.latest_display.copy()
+                self.display_dirty = False
+            else:
+                display = None
         try:
-            cv2.imshow("Meta Quest Depth Overlay", display)
+            if display is not None:
+                if not self.window_created:
+                    cv2.namedWindow("Meta Quest Depth Overlay", cv2.WINDOW_NORMAL)
+                    self.window_created = True
+                cv2.imshow("Meta Quest Depth Overlay", display)
             key = cv2.waitKey(1) & 0xFF
             if key in (27, ord("q")):
                 rospy.signal_shutdown("OpenCV window closed by user")
@@ -758,7 +766,7 @@ class MetaOverlayNode:
             rospy.logwarn("OpenCV display disabled: %s", exc)
 
     def shutdown(self):
-        if self.display_enabled:
+        if self.display_enabled and self.window_created:
             try:
                 cv2.destroyAllWindows()
             except cv2.error:
