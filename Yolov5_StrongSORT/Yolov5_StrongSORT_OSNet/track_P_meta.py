@@ -38,7 +38,7 @@ META_TF_TOPIC = "/meta_tf"
 META_COLOR_POSE_QR_TOPIC = "/meta_color_pose_qr"
 QRP_POSITION_TOPIC = "/QRposition"
 META_OBJECT_POSITION_BASE_TOPIC = "/meta_object_position_base"
-P_YOLO_TOPIC = "/P_yolo"
+P_META_TOPIC = "/P_meta"
 
 COLOR_FRAME = "quest_color_left_optical"
 DEPTH_FRAME = "quest_depth_left_optical"
@@ -121,13 +121,13 @@ class MetaOverlayNode:
         self.test_point_enabled = rospy.get_param("~test_point_enabled", False)
         self.test_point_u = int(rospy.get_param("~test_point_u", 320))
         self.test_point_v = int(rospy.get_param("~test_point_v", 320))
-        self.publish_p_yolo = rospy.get_param("~publish_p_yolo", True)
+        self.publish_p_meta = rospy.get_param("~publish_p_meta", True)
         self.object_position_pub = rospy.Publisher(
             META_OBJECT_POSITION_BASE_TOPIC,
             PointStamped,
             queue_size=10,
         )
-        self.p_yolo_pub = rospy.Publisher(P_YOLO_TOPIC, Float32MultiArray, queue_size=10)
+        self.p_meta_pub = rospy.Publisher(P_META_TOPIC, Float32MultiArray, queue_size=10)
 
         # CameraInfo and /meta_tf are deliberately ordinary subscribers.
         # No tf2_ros.TransformListener and no /tf subscription are used here.
@@ -167,8 +167,8 @@ class MetaOverlayNode:
                 self.test_point_u,
                 self.test_point_v,
             )
-        if not self.publish_p_yolo:
-            rospy.loginfo("/P_yolo publishing disabled by ~publish_p_yolo")
+        if not self.publish_p_meta:
+            rospy.loginfo("/P_meta publishing disabled by ~publish_p_meta")
 
         self._check_topic_presence()
 
@@ -329,9 +329,9 @@ class MetaOverlayNode:
         message.point.z = float(point_base[2])
         self.object_position_pub.publish(message)
 
-    def _publish_p_yolo(self, bottle_positions_base):
-        """Publish existing /P_yolo Float32MultiArray records (12 floats/object)."""
-        if not self.publish_p_yolo:
+    def _publish_p_meta(self, bottle_positions_base):
+        """Publish /P_meta Float32MultiArray records (12 floats/object)."""
+        if not self.publish_p_meta:
             return
 
         covariance = np.diag([0.005 ** 2, 0.005 ** 2, 0.010 ** 2])
@@ -343,7 +343,7 @@ class MetaOverlayNode:
                 np.asarray(point_base, dtype=np.float32).tolist()
                 + covariance.astype(np.float32).reshape(-1).tolist()
             )
-        self.p_yolo_pub.publish(message)
+        self.p_meta_pub.publish(message)
 
     def _verify_known_depth_point(self, depth, depth_info, tf_record, color_pose_qr_msg, stamp):
         """Validate the requested depth->color->QR->base chain with one known pixel."""
@@ -1023,7 +1023,7 @@ class MetaOverlayNode:
         )
         for point_base in bottle_positions_base:
             self._publish_base_point(point_base, color_msg.header.stamp)
-        self._publish_p_yolo(bottle_positions_base)
+        self._publish_p_meta(bottle_positions_base)
         rospy.loginfo_throttle(
             2.0,
             "YOLO detections=%d bottles_in_robot_base=%d",
