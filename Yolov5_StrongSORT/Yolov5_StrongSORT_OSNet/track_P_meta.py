@@ -289,7 +289,7 @@ class MetaOverlayNode:
         )
 
     def _color_pose_to_base(self, color_point, color_pose_qr_msg):
-        """Apply T_qr_from_color and inverse(T_qr_from_base)."""
+        """Transform a color point to base, then map (x, y, z) to (x, -z, y)."""
         try:
             qr_from_color = self._pose_stamped_to_matrix(color_pose_qr_msg)
         except ValueError as exc:
@@ -309,7 +309,10 @@ class MetaOverlayNode:
             return None
 
         point_qr = self._transform_point(qr_from_color, color_point)
-        return self._transform_point(base_from_qr, point_qr)
+        point_base = self._transform_point(base_from_qr, point_qr)
+        # Yだけの符号反転は行わず、補正前の座標を新Y=-旧Z、新Z=旧Yへ変換する。
+        # 画面表示と両方の位置トピックで、この補正済み座標を共有する。
+        return np.array([point_base[0], -point_base[2], point_base[1]])
 
     def _depth_to_color_point(self, point_depth, tf_record):
         """Apply p_color = T_color_from_depth * p_depth using /meta_tf."""
@@ -335,12 +338,22 @@ class MetaOverlayNode:
             return
 
         covariance = np.diag([0.005 ** 2, 0.005 ** 2, 0.010 ** 2])
+
+        # オフセット [X, Y, Z]：単位 m
+        offset = np.array([0.0, 0.0, -0.173], dtype=np.float32)
+
         message = Float32MultiArray()
         for point_base in bottle_positions_base:
+
+            point_corrected = np.asarray(point_base, dtype=np.float32) + offset
             # Keep the existing track_P_yolo record layout:
             # mean XYZ (3) + row-major 3x3 covariance (9).
+            # message.data.extend(
+            #     np.asarray(point_base, dtype=np.float32).tolist()
+            #     + covariance.astype(np.float32).reshape(-1).tolist()
+            # )
             message.data.extend(
-                np.asarray(point_base, dtype=np.float32).tolist()
+                point_corrected.tolist()
                 + covariance.astype(np.float32).reshape(-1).tolist()
             )
         self.p_meta_pub.publish(message)
@@ -789,7 +802,7 @@ class MetaOverlayNode:
             return str(self.yolo_names[class_id])
         return str(class_id)
 
-    @staticmethod
+    @staticmethod 
     def _point_at_color_pixel(point_buffer_color, u, v):
         height, width = point_buffer_color.shape[:2]
         if 0 <= u < width and 0 <= v < height:

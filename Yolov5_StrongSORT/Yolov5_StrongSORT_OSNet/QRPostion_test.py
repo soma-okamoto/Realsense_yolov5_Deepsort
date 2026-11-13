@@ -434,7 +434,9 @@ def image_callback(depth_msg, color_msg):
     # QR座標系から見たBase姿勢
     # base座標系から見たQR姿勢が R_base_qr なので、
     # その逆回転が QR座標系から見たBase姿勢になる
-    R_qr_base = R_base_qr.T
+    # 出力姿勢のローカルX軸まわりに+90度補正する（右から掛ける）。
+    # 新Y = 旧Z（手前）、新Z = -旧Y（上）。位置の計算には適用しない。
+    R_qr_base = R_base_qr.T @ rot_x(DegToRad(90))
 
     T_qr_base = np.eye(4)
     T_qr_base[:3, :3] = R_qr_base

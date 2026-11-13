@@ -44,6 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ros-noetic-move-base-msgs \
       ros-noetic-sensor-msgs \
       ros-noetic-std-msgs \
+      ros-noetic-tf \ 
       ros-noetic-tf2-geometry-msgs \
       ros-noetic-tf2-ros \
     && rm -rf /var/lib/apt/lists/*
