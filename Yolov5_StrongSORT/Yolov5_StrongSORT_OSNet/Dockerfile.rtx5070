@@ -5,6 +5,7 @@
 #   Yolov5_StrongSORT_OSNet/
 #     Dockerfile.rtx5070
 #     docker-entrypoint_rtx5070.sh
+#     rebuild_cv_bridge_rtx5070.sh
 #     requirements.txt
 #     yolov5/requirements.txt
 
@@ -31,7 +32,11 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # -----------------------------------------------------------------------------
 # OS / GUI / build dependencies
 # -----------------------------------------------------------------------------
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# CUDA/cuDNN are already installed in the base image; PyTorch uses cu128 wheels.
+# Disable the unused CUDA APT source before any update so its TLS/OCSP failures
+# cannot block Ubuntu or ROS packages. Keep certificate verification enabled.
+RUN rm -f /etc/apt/sources.list.d/cuda*.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
       bash-completion \
       build-essential \
       bzip2 \
@@ -83,6 +88,7 @@ RUN curl -fsSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc \
       ros-noetic-ros-base \
       ros-noetic-sensor-msgs \
       ros-noetic-std-msgs \
+      ros-noetic-tf \
       ros-noetic-tf2-geometry-msgs \
       ros-noetic-tf2-ros \
     && rm -rf /var/lib/apt/lists/*
@@ -174,33 +180,8 @@ ENV LD_LIBRARY_PATH=/opt/boost-python310/lib:${LD_LIBRARY_PATH}
 # -----------------------------------------------------------------------------
 # Rebuild cv_bridge for Python 3.10
 # -----------------------------------------------------------------------------
-RUN mkdir -p /opt/cv_bridge_ws/src \
-    && git clone --depth 1 --branch noetic \
-      https://github.com/ros-perception/vision_opencv.git \
-      /opt/cv_bridge_ws/src/vision_opencv \
-    && source /opt/ros/${ROS_DISTRO}/setup.bash \
-    && catkin config \
-      --workspace /opt/cv_bridge_ws \
-      --extend /opt/ros/${ROS_DISTRO} \
-      --install \
-      --install-space /opt/ros_py310 \
-    && catkin build \
-      --workspace /opt/cv_bridge_ws \
-      cv_bridge \
-      --no-status \
-      --summarize \
-      --cmake-args \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DSETUPTOOLS_DEB_LAYOUT=OFF \
-        -DPYTHON_EXECUTABLE=${CONDA_ENV}/bin/python3 \
-        -DPYTHON_INCLUDE_DIR=${CONDA_ENV}/include/python3.10 \
-        -DPYTHON_LIBRARY=${CONDA_ENV}/lib/libpython3.10.so \
-        -DBOOST_ROOT=/opt/boost-python310 \
-        -DBoost_NO_SYSTEM_PATHS=ON \
-        -DBoost_INCLUDE_DIR=/opt/boost-python310/include \
-        -DBoost_LIBRARY_DIR=/opt/boost-python310/lib \
-        -DBoost_PYTHON_LIBRARY=/opt/boost-python310/lib/libboost_python3.so \
-    && rm -rf /opt/cv_bridge_ws/build /opt/cv_bridge_ws/logs
+COPY rebuild_cv_bridge_rtx5070.sh /usr/local/bin/rebuild_cv_bridge_rtx5070.sh
+RUN bash /usr/local/bin/rebuild_cv_bridge_rtx5070.sh
 
 ENV PYTHONPATH=/opt/ros_py310/lib/python3.10/site-packages:/opt/ros_py310/lib/python3.10/dist-packages:/opt/ros_py310/lib/python3/dist-packages:/opt/ros/noetic/lib/python3/dist-packages
 # -----------------------------------------------------------------------------
@@ -300,6 +281,10 @@ RUN source /opt/ros/noetic/setup.bash \
          | tr ':' '\n' \
          | awk 'NF && $0 != "/usr/lib/python3/dist-packages" && !seen[$0]++' \
          | paste -sd: -)" \
+    && SYSTEM_LIBFFI="$(ldconfig -p \
+         | awk '/libffi\.so\.7 .*x86-64/ && !found {print $NF; found=1}')" \
+    && test -n "${SYSTEM_LIBFFI}" \
+    && export LD_PRELOAD="${SYSTEM_LIBFFI}${LD_PRELOAD:+:${LD_PRELOAD}}" \
     && PYTHONNOUSERSITE=1 "${CONDA_ENV}/bin/python" -c "import sys; \
 import numpy; \
 print('Python:', sys.executable); \
@@ -309,6 +294,15 @@ print('NumPy path:', numpy.__file__); \
 import rospy; \
 import cv2; \
 import cv_bridge; \
+assert cv_bridge.__file__.startswith('/opt/ros_py310/'), cv_bridge.__file__; \
+bridge = cv_bridge.CvBridge(); \
+bgr = numpy.array([[[10, 20, 30]]], dtype=numpy.uint8); \
+color_msg = bridge.cv2_to_imgmsg(bgr, encoding='bgr8'); \
+numpy.testing.assert_array_equal(bridge.imgmsg_to_cv2(color_msg, 'rgb8'), bgr[:, :, ::-1]); \
+depth = numpy.array([[1.25]], dtype=numpy.float32); \
+depth_msg = bridge.cv2_to_imgmsg(depth, encoding='32FC1'); \
+numpy.testing.assert_array_equal(bridge.imgmsg_to_cv2(depth_msg, 'passthrough'), depth); \
+print('cv_bridge color/depth conversion OK:', cv_bridge.__file__); \
 import PyKDL; \
 import tf2_geometry_msgs; \
 import pyrealsense2; \

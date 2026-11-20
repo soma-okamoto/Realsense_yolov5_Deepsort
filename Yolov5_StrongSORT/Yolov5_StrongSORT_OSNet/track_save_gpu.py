@@ -60,6 +60,9 @@ fps = 60.
 delay = 1/fps*0.5
 pubdata = yolov5_data()   
 
+# ボトル表面から中心まで、カメラの奥方向（+Z）へ補正する距離 [m]
+BOTTLE_CENTER_OFFSET_M = 0.03
+
 def ImageCallback(depthdata, colordata):
     global color_frame
     global depth_frame
@@ -162,10 +165,11 @@ def rot_z(th):
   
   return Rz
 
-def CoordinateTransformation(x,y,z,color_intr):
+def CoordinateTransformation(x,y,z,color_intr,depth_offset_m=0.0):
 
     world_point = rs.rs2_deproject_pixel_to_point(color_intr , [x,y],z)
-    from_eef_to_object=np.array([[-world_point[1]],[world_point[0]],[z]])
+    # 表面のX/Yは維持し、座標変換前にカメラのZ方向だけ補正する。
+    from_eef_to_object=np.array([[-world_point[1]],[world_point[0]],[z + depth_offset_m]])
     #アームに司令されているもの
     # q1 = -DegToRad(-60)+DegToRad(169)
     # q2 = DegToRad(70)+DegToRad(65)
@@ -536,7 +540,11 @@ def run(
                                                 x,
                                                 y,
                                                 z_m,
-                                                color_intr
+                                                color_intr,
+                                                depth_offset_m=(
+                                                    BOTTLE_CENTER_OFFSET_M
+                                                    if names[c].lower() == "bottle" else 0.0
+                                                ),
                                             )
 
 

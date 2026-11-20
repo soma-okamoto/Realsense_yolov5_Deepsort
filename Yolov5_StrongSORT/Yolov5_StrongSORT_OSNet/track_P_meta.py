@@ -15,7 +15,6 @@ import cv2
 import message_filters
 import numpy as np
 import rospy
-from cv_bridge import CvBridge, CvBridgeError
 from geometry_msgs.msg import PointStamped, PoseStamped
 from sensor_msgs.msg import CameraInfo, Image
 from std_msgs.msg import Float32MultiArray
@@ -79,7 +78,6 @@ def quaternion_to_rotation_matrix(quaternion):
 
 class MetaOverlayNode:
     def __init__(self):
-        self.bridge = CvBridge()
         self.lock = threading.Lock()
 
         self.color_info = None
@@ -147,7 +145,7 @@ class MetaOverlayNode:
             slop=float(slop),
             allow_headerless=False,
         )
-        self.image_sync.registerCallback(self.image_callback)
+        self.image_sync.registerCallback(self._safe_image_callback)
 
         rospy.loginfo("Meta Quest overlay node started")
         rospy.loginfo("Color topic: %s", COLOR_TOPIC)
@@ -565,30 +563,54 @@ class MetaOverlayNode:
                 return None, None
             return self.color_info.copy(), self.depth_info.copy()
 
+    @staticmethod
+    def _decode_image_rows(msg, dtype, channels):
+        """Decode raw ROS Image data with row padding and byte order preserved.
+
+        This path needs no cv_bridge Boost extension, which may be incompatible
+        with the Python/CUDA environment used for YOLO.
+        """
+        height, width, step = int(msg.height), int(msg.width), int(msg.step)
+        native_dtype = np.dtype(dtype)
+        wire_dtype = native_dtype.newbyteorder(">" if msg.is_bigendian else "<")
+        pixel_bytes = channels * wire_dtype.itemsize
+        if height <= 0 or width <= 0 or step < width * pixel_bytes:
+            raise ValueError("Invalid Image dimensions or row step")
+        try:
+            data = memoryview(msg.data)
+        except TypeError:
+            data = memoryview(bytes(msg.data))
+        if not data.contiguous or data.nbytes < height * step:
+            raise ValueError("Image data is shorter than height * step or not contiguous")
+        if channels == 1:
+            shape, strides = (height, width), (step, wire_dtype.itemsize)
+        else:
+            shape = (height, width, channels)
+            strides = (step, pixel_bytes, wire_dtype.itemsize)
+        image = np.ndarray(shape, dtype=wire_dtype, buffer=data, strides=strides)
+        # Own a contiguous, native-endian buffer after the ROS callback returns.
+        return image.astype(native_dtype, copy=True)
+
     def _convert_color(self, msg):
-        if msg.encoding != "rgb8":
-            rospy.logwarn_throttle(
-                5.0,
-                "Color encoding is %s, expected rgb8; attempting conversion",
-                msg.encoding,
-            )
-        rgb = self.bridge.imgmsg_to_cv2(msg, desired_encoding="rgb8")
-        if rgb.ndim != 3 or rgb.shape[2] != 3:
-            raise ValueError("Color image is not an HxWx3 image")
-        return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+        encodings = {
+            "rgb8": (3, cv2.COLOR_RGB2BGR),
+            "bgr8": (3, None),
+            "rgba8": (4, cv2.COLOR_RGBA2BGR),
+            "bgra8": (4, cv2.COLOR_BGRA2BGR),
+            "mono8": (1, cv2.COLOR_GRAY2BGR),
+        }
+        if msg.encoding not in encodings:
+            raise ValueError("Unsupported Meta color encoding: %s" % msg.encoding)
+        channels, conversion = encodings[msg.encoding]
+        image = self._decode_image_rows(msg, np.uint8, channels)
+        return image if conversion is None else cv2.cvtColor(image, conversion)
 
     def _convert_depth(self, msg):
+        # The publisher contract is floating-point depth in metres. Do not
+        # silently interpret integer depth (often millimetres) as metres.
         if msg.encoding != "32FC1":
-            rospy.logwarn_throttle(
-                5.0,
-                "Depth encoding is %s, expected 32FC1; attempting conversion",
-                msg.encoding,
-            )
-        depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="32FC1")
-        depth = np.asarray(depth, dtype=np.float32)
-        if depth.ndim != 2:
-            raise ValueError("Depth image is not a single-channel image")
-        return depth
+            raise ValueError("Meta depth requires 32FC1 in metres; received %s" % msg.encoding)
+        return self._decode_image_rows(msg, np.float32, 1)
 
     def _project_depth(self, depth, depth_info, color_info, tf_record):
         """Project depth pixels into the color image and apply a Z-buffer."""
@@ -937,6 +959,14 @@ class MetaOverlayNode:
             rospy.logerr_throttle(2.0, "YOLO inference failed: %s", exc)
             return color_bgr, 0, []
 
+    def _safe_image_callback(self, color_msg, depth_msg, color_pose_qr_msg):
+        # ApproximateTimeSynchronizer calls us while holding its lock. An
+        # escaping exception can leave that lock held and stop all later frames.
+        try:
+            self.image_callback(color_msg, depth_msg, color_pose_qr_msg)
+        except Exception as exc:
+            rospy.logerr_throttle(2.0, "Meta image callback failed: %s", exc)
+
     def image_callback(self, color_msg, depth_msg, color_pose_qr_msg):
         color_signature = (color_msg.encoding, color_msg.width, color_msg.height, color_msg.header.frame_id)
         depth_signature = (depth_msg.encoding, depth_msg.width, depth_msg.height, depth_msg.header.frame_id)
@@ -987,7 +1017,7 @@ class MetaOverlayNode:
                 color_info,
                 tf_record,
             )
-        except (CvBridgeError, ValueError, cv2.error) as exc:
+        except (ValueError, cv2.error) as exc:
             rospy.logerr_throttle(2.0, "Meta Quest image processing failed: %s", exc)
             return
 

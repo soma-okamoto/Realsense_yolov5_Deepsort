@@ -11,7 +11,7 @@ import message_filters
 
 from brics_actuator.msg import JointPositions
 from geometry_msgs.msg import PoseStamped
-import tf.transformations as tft
+from scipy.spatial.transform import Rotation
 
 QR_SIZE_M = 0.2
 
@@ -438,10 +438,8 @@ def image_callback(depth_msg, color_msg):
     # 新Y = 旧Z（手前）、新Z = -旧Y（上）。位置の計算には適用しない。
     R_qr_base = R_base_qr.T @ rot_x(DegToRad(90))
 
-    T_qr_base = np.eye(4)
-    T_qr_base[:3, :3] = R_qr_base
-
-    q_qr_base = tft.quaternion_from_matrix(T_qr_base)
+    # SciPyもROSのQuaternionと同じ (x, y, z, w) 順で返す。
+    q_qr_base = Rotation.from_matrix(R_qr_base).as_quat()
 
     pose_msg.pose.orientation.x = q_qr_base[0]
     pose_msg.pose.orientation.y = q_qr_base[1]

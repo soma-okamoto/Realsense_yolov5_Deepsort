@@ -61,6 +61,13 @@ fps = 60.
 delay = 1/fps*0.5
 pubdata = yolov5_data()
 
+# ボトル表面から中心まで、カメラの奥方向（+Z）へ補正する距離 [m]
+BOTTLE_CENTER_OFFSET_M = 0.03
+
+# 横幅の中央で測る下側の位置（ボックス上端=0、下端=1）。
+BOTTLE_DEPTH_Y_RATIO = 0.75
+BOTTLE_DEPTH_PATCH_RADIUS_PX = 2  # 各測定点の周囲5x5画素
+
 # 初期値
 Place_command_Sub = False
 
@@ -71,12 +78,57 @@ from collections import defaultdict
 
 collecting_yolo = False
 collection_start_time = None
-collection_duration = 0.75
+collection_start_delay = 2.5
+collection_duration = 1.0
 
 track_samples = defaultdict(list)
 track_confidences = defaultdict(list)
 
-minimum_samples = 5
+minimum_samples = 3
+
+
+def estimate_bottle_depth_m(depth_m, bbox, diagnostics=None):
+    """Return the lower patch median; optionally report depth validity details."""
+    if diagnostics is None:
+        diagnostics = {}
+    diagnostics.update(samples=[], reason='invalid bbox')
+    x1, y1, x2, y2 = map(float, bbox)
+    if not np.all(np.isfinite([x1, y1, x2, y2])) or x2 <= x1 or y2 <= y1:
+        return None
+
+    height, width = depth_m.shape
+    sample_x = int((x1 + x2) / 2)
+    sample_y = int(y1 + (y2 - y1) * BOTTLE_DEPTH_Y_RATIO)
+    radius = BOTTLE_DEPTH_PATCH_RADIUS_PX
+    sample = dict(point=(sample_x, sample_y), depth_m=None,
+                  valid_count=0, total_count=0, reason='outside image')
+    diagnostics['samples'].append(sample)
+    if not (0 <= sample_x < width and 0 <= sample_y < height):
+        diagnostics['reason'] = sample['reason']
+        return None
+
+    # 画像外・ボックス外の画素は測定に使わない。
+    left = max(0, int(np.ceil(x1)), sample_x - radius)
+    right = min(width, int(np.ceil(x2)), sample_x + radius + 1)
+    top = max(0, int(np.ceil(y1)), sample_y - radius)
+    bottom = min(height, int(np.ceil(y2)), sample_y + radius + 1)
+    if left >= right or top >= bottom:
+        sample['reason'] = diagnostics['reason'] = 'empty patch'
+        return None
+
+    patch = depth_m[top:bottom, left:right]
+    valid = patch[np.isfinite(patch) & (patch > 0)]
+    sample.update(valid_count=int(valid.size), total_count=int(patch.size))
+    if valid.size == 0:
+        sample['reason'] = 'no valid depth'
+    else:
+        sample['depth_m'] = float(np.median(valid))
+        sample['reason'] = 'too few valid pixels' if valid.size < patch.size / 2 else 'ok'
+
+    diagnostics['reason'] = sample['reason']
+    if sample['reason'] != 'ok':
+        return None
+    return sample['depth_m']
 
 
 def ImageCallback(depthdata, colordata):
@@ -181,10 +233,11 @@ def rot_z(th):
   
   return Rz
 
-def CoordinateTransformation(x,y,z,color_intr):
+def CoordinateTransformation(x,y,z,color_intr,depth_offset_m=0.0):
 
     world_point = rs.rs2_deproject_pixel_to_point(color_intr , [x,y],z)
-    from_eef_to_object=np.array([[-world_point[1]],[world_point[0]],[z]])
+    # 表面のX/Yは維持し、座標変換前にカメラのZ方向だけ補正する。
+    from_eef_to_object=np.array([[-world_point[1]],[world_point[0]],[z + depth_offset_m]])
     #アームに司令されているもの
     # q1 = -DegToRad(-60)+DegToRad(169)
     # q2 = DegToRad(70)+DegToRad(65)
@@ -400,20 +453,32 @@ def run(
                 rospy.sleep(0.01)
                 continue
 
-            if not getattr(color_frame, "encoding", "") or \
-                not getattr(depth_frame, "encoding", ""):
+            current_color_frame = color_frame
+            current_depth_frame = depth_frame
+            if not getattr(current_color_frame, "encoding", "") or \
+                not getattr(current_depth_frame, "encoding", ""):
                     rospy.sleep(0.01)
                     continue
             try:
-                color_image = bridge.imgmsg_to_cv2(color_frame, 'bgr8')
-                depth_image = bridge.imgmsg_to_cv2(depth_frame, '32FC1')
+                color_image = bridge.imgmsg_to_cv2(current_color_frame, 'bgr8')
+                depth_image = bridge.imgmsg_to_cv2(current_depth_frame, 'passthrough')
+                if current_depth_frame.encoding in ('16UC1', 'mono16'):
+                    depth_scale_m = 0.001
+                elif current_depth_frame.encoding == '32FC1':
+                    depth_scale_m = 1.0
+                else:
+                    rospy.logwarn_throttle(
+                        5.0, f"Unsupported depth encoding: {current_depth_frame.encoding}"
+                    )
+                    continue
+                depth_image = depth_image.astype(np.float32) * depth_scale_m
 
 
             except CvBridgeError as e:
                 rospy.logerr(f"cv_bridge failed: {e}")
                 continue
                 
-            pubdata.header.stamp = color_frame.header.stamp
+            pubdata.header.stamp = current_color_frame.header.stamp
             
             time = rospy.get_time()
 
@@ -469,6 +534,7 @@ def run(
                     p = Path(p)  # to Path
                     
                     annotator = Annotator(im0, line_width=2, pil=not ascii)
+                    depth_sample_points = []
                     if cfg.STRONGSORT.ECC:  # camera motion compensation
                         strongsort_list[i].tracker.camera_update(prev_frames[i], curr_frames[i])
 
@@ -502,21 +568,59 @@ def run(
                                         if(d1 > 50 and d1 < 590):
                                             # print(d1)
                                             #print("d1 d2 ::::::::::" + str(d1) +  "::::::::::: " + str(d2))
-                                            zDepth = depth[int(d2),int(d1)]
-
-
                                             x = output[0] + (output[2] - output[0])/2
                                             y = output[1] + (output[3] - output[1])/2
+                                            is_bottle = names[c].lower() == "bottle"
+                                            if is_bottle:
+                                                depth_diagnostics = {}
+                                                z_m = estimate_bottle_depth_m(
+                                                    depth, bboxes, diagnostics=depth_diagnostics
+                                                )
+                                                status_color = (0, 255, 0) if z_m is not None else (0, 0, 255)
+                                                patch_details = []
+                                                for sample in depth_diagnostics['samples']:
+                                                    depth_text = (
+                                                        f"{sample['depth_m']:.3f}m"
+                                                        if sample['depth_m'] is not None else 'N/A'
+                                                    )
+                                                    text = (f"B:{depth_text} "
+                                                            f"{sample['valid_count']}/{sample['total_count']}")
+                                                    patch_details.append(f"{text} ({sample['reason']})")
+                                                    text += f" {depth_diagnostics['reason']}"
+                                                    depth_sample_points.append(
+                                                        (sample['point'], (255, 255, 0), status_color, text)
+                                                    )
+                                                if z_m is None:
+                                                    rospy.logwarn_throttle(
+                                                        2.0,
+                                                        f"Bottle track {int(id)} depth rejected: "
+                                                        f"{depth_diagnostics['reason']}; "
+                                                        f"{'; '.join(patch_details)}; "
+                                                        f"encoding={current_depth_frame.encoding}"
+                                                    )
+                                                    continue
+                                            else:
+                                                if not (0 <= int(d2) < depth.shape[0]
+                                                        and 0 <= int(d1) < depth.shape[1]):
+                                                    continue
+                                                z_m = float(depth[int(d2), int(d1)])
+                                                if not np.isfinite(z_m) or z_m <= 0:
+                                                    continue
 
-                                            object2base = CoordinateTransformation(x,y,zDepth/1000,color_intr)
-                                            world_point = rs.rs2_deproject_pixel_to_point(color_intr , [x,y],zDepth/1000)
+                                            object2base = CoordinateTransformation(
+                                                x, y, z_m, color_intr,
+                                                depth_offset_m=(
+                                                    BOTTLE_CENTER_OFFSET_M
+                                                    if is_bottle else 0.0
+                                                ),
+                                            )
                       
 
                                                                                 
                                             label = None if hide_labels else (f'{id} {names[c]}' if hide_conf else \
                                             (f'{id} {conf:.2f}' if hide_class else f'{id} {c} {float(object2base[0][0]):.2f} {float(object2base[1][0]):.2f} {float(object2base[2][0]):.2f}'))
                                             
-                                            if collecting_yolo:
+                                            if is_yolo_collection_frame(current_color_frame.header.stamp):
                                                 track_id = int(id)
 
                                                 position = np.array([
@@ -554,7 +658,22 @@ def run(
                         LOGGER.info('No detections')
                     
                     # Write results
-                    im0 = annotator.result()
+                    im0 = annotator.result().copy()
+                    for sample_point, point_color, status_color, text in depth_sample_points:
+                        if (0 <= sample_point[0] < im0.shape[1]
+                                and 0 <= sample_point[1] < im0.shape[0]):
+                            cv2.circle(im0, sample_point, 6, (0, 0, 0), -1, cv2.LINE_AA)
+                            cv2.circle(im0, sample_point, 5, status_color, -1, cv2.LINE_AA)
+                            cv2.circle(im0, sample_point, 3, point_color, -1, cv2.LINE_AA)
+                            text_width = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.4, 1)[0][0]
+                            text_origin = (
+                                max(0, min(sample_point[0] + 8, im0.shape[1] - text_width - 2)),
+                                max(12, sample_point[1] - 8),
+                            )
+                            cv2.putText(im0, text, text_origin, cv2.FONT_HERSHEY_SIMPLEX,
+                                        0.4, (0, 0, 0), 3, cv2.LINE_AA)
+                            cv2.putText(im0, text, text_origin, cv2.FONT_HERSHEY_SIMPLEX,
+                                        0.4, status_color, 1, cv2.LINE_AA)
                     cv2.imshow(str(p), im0)
                     #cv2.imshow("depth_img",depth_copy)
                     cv2.waitKey(1)  # 1 millisecond
@@ -634,6 +753,15 @@ def main(opt):
     # else:
     #     t = (0.0, 0.0, 0.0, 0.0)
 
+def is_yolo_collection_frame(stamp):
+    """Collect only images captured during the delayed collection window."""
+    start = collection_start_time
+    if not collecting_yolo or start is None:
+        return False
+    elapsed = (stamp - start).to_sec()
+    return 0.0 <= elapsed < collection_duration
+
+
 def callback_place_command(data):
     global collecting_yolo
     global collection_start_time
@@ -646,11 +774,13 @@ def callback_place_command(data):
         track_samples.clear()
         track_confidences.clear()
 
-        collection_start_time = rospy.Time.now()
+        collection_start_time = rospy.Time.now() + rospy.Duration(collection_start_delay)
         collecting_yolo = True
 
         rospy.loginfo(
-            "Received Place command: YOLO collection started"
+            "Received Place command: YOLO collection starts in %.1f s and runs for %.1f s",
+            collection_start_delay,
+            collection_duration,
         )
 def finalize_yolo_collection(pub):
     global collecting_yolo
